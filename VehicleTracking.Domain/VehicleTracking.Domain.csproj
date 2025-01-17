@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VehicleTracking.Infrastructure\VehicleTracking.Infrastructure.csproj" />
+    <ProjectReference Include="..\VehicleTracking.Shared\VehicleTracking.Shared.csproj" />
+    <ProjectReference Include="..\VehicleTracking.Util\VehicleTracking.Util.csproj" />
+  </ItemGroup>
+
+</Project>
