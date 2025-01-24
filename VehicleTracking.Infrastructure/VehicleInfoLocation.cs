@@ -58,8 +58,10 @@ public partial class VehicleInfoLocation
     [Column(TypeName = "decimal(18, 2)")]
     public decimal? Temperature { get; set; }
 
-    [StringLength(200)]
+    [StringLength(2000)]
     public string? Reason { get; set; }
+
+    public short? Angle { get; set; }
 
     [ForeignKey("ManifestId")]
     [InverseProperty("VehicleInfoLocations")]

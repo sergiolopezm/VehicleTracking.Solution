@@ -138,7 +138,8 @@ public class TrackingService : ITrackingService
                                 Location = new GeoPoint(
                                     Convert.ToDouble(locationData.Latitude),
                                     Convert.ToDouble(locationData.Longitude)
-                                ).ToPoint()
+                                ).ToPoint(),
+                                Angle = (short?)locationData.Angle
                             };
 
                             await context.VehicleInfoLocations.AddAsync(tracking);
@@ -207,7 +208,8 @@ public class TrackingService : ITrackingService
             InZone = locationData.InZone,
             DetentionTime = locationData.DetentionTime,
             DistanceTraveled = locationData.DistanceTraveled,
-            Temperature = locationData.Temperature
+            Temperature = locationData.Temperature,
+            Angle = (short?)locationData.Angle
         };
 
         await _repository.AddVehicleTrackingAsync(tracking);

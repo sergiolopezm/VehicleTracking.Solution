@@ -80,6 +80,7 @@ namespace VehicleTracking.Domain.Services.DetektorGps
                 tracking.DetentionTime = tracking.DetentionTime ?? string.Empty;
                 tracking.DistanceTraveled = tracking.DistanceTraveled ?? 0m;
                 tracking.Temperature = tracking.Temperature ?? 0m;
+                tracking.Angle = tracking.Angle ?? 0;
 
                 await context.VehicleInfoLocations.AddAsync(tracking);
                 await context.SaveChangesAsync();

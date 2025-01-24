@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using System;
+using System.Collections.Generic;
+using Microsoft.EntityFrameworkCore;
 
 namespace VehicleTracking.Infrastructure;
 
@@ -13,7 +15,7 @@ public partial class DBContext : DbContext
     {
     }
 
-    public virtual DbSet<Acceso> Accesos { get; set; }
+    public virtual DbSet<Acceso> Accesos { get; set; } 
 
     public virtual DbSet<Account> Accounts { get; set; }
 
@@ -136,7 +138,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Acceso>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Acceso__3214EC07DA3391F0");
+            entity.HasKey(e => e.Id).HasName("PK__Acceso__3214EC0747046EE3");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
@@ -144,7 +146,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Account>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Account__3214EC07E01E91B9");
+            entity.HasKey(e => e.Id).HasName("PK__Account__3214EC079A9D19B8");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Code).HasDefaultValue("");
@@ -155,7 +157,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<AccountRole>(entity =>
         {
-            entity.HasKey(e => new { e.AccountId, e.RoleId }).HasName("PK__AccountR__8C3209475B116E97");
+            entity.HasKey(e => new { e.AccountId, e.RoleId }).HasName("PK__AccountR__8C3209471136C4B6");
         });
 
         modelBuilder.Entity<Alarm>(entity =>
@@ -236,7 +238,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Log>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Log__3214EC079E9063F1");
+            entity.HasKey(e => e.Id).HasName("PK__Log__3214EC07B4BD58CB");
 
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
             entity.Property(e => e.Fecha).HasDefaultValueSql("(getutcdate())");
@@ -291,7 +293,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Role>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Role__3214EC07BFF7313A");
+            entity.HasKey(e => e.Id).HasName("PK__Role__3214EC07E039202B");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
@@ -305,7 +307,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Tenant>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Tenant__3214EC0704A65DC8");
+            entity.HasKey(e => e.Id).HasName("PK__Tenant__3214EC077D7816C1");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
@@ -313,7 +315,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Token>(entity =>
         {
-            entity.HasKey(e => e.IdToken).HasName("PK__Token__D6332447B285E008");
+            entity.HasKey(e => e.IdToken).HasName("PK__Token__D6332447EE810107");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
@@ -321,18 +323,18 @@ public partial class DBContext : DbContext
 
             entity.HasOne(d => d.IdUsuarioNavigation).WithMany(p => p.Tokens)
                 .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK__Token__IdUsuario__6CD828CA");
+                .HasConstraintName("FK__Token__IdUsuario__65370702");
         });
 
         modelBuilder.Entity<TokenExpirado>(entity =>
         {
-            entity.HasKey(e => e.IdToken).HasName("PK__TokenExp__D6332447548AD80A");
+            entity.HasKey(e => e.IdToken).HasName("PK__TokenExp__D6332447348C7A56");
 
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
 
             entity.HasOne(d => d.IdUsuarioNavigation).WithMany(p => p.TokenExpirados)
                 .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK__TokenExpi__IdUsu__70A8B9AE");
+                .HasConstraintName("FK__TokenExpi__IdUsu__690797E6");
         });
 
         modelBuilder.Entity<Tracking>(entity =>
@@ -342,7 +344,7 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<Usuario>(entity =>
         {
-            entity.HasKey(e => e.IdUsuario).HasName("PK__Usuario__5B65BF978C61825D");
+            entity.HasKey(e => e.IdUsuario).HasName("PK__Usuario__5B65BF97FADFD5EC");
 
             entity.Property(e => e.Active).HasDefaultValue(true);
             entity.Property(e => e.Created).HasDefaultValueSql("(getutcdate())");
@@ -350,7 +352,7 @@ public partial class DBContext : DbContext
 
             entity.HasOne(d => d.Role).WithMany(p => p.Usuarios)
                 .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK__Usuario__RoleId__671F4F74");
+                .HasConstraintName("FK__Usuario__RoleId__5F7E2DAC");
         });
 
         modelBuilder.Entity<Vehicle>(entity =>
@@ -360,18 +362,18 @@ public partial class DBContext : DbContext
 
         modelBuilder.Entity<VehicleInfoLocation>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__VehicleI__3214EC0724907546");
+            entity.HasKey(e => e.Id).HasName("PK__VehicleI__3214EC07730AB5FE");
 
             entity.Property(e => e.Created).HasDefaultValueSql("(getdate())");
             entity.Property(e => e.IsActive).HasDefaultValue(true);
 
             entity.HasOne(d => d.Manifest).WithMany(p => p.VehicleInfoLocations)
                 .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK__VehicleIn__Manif__7A3223E8");
+                .HasConstraintName("FK__VehicleIn__Manif__72910220");
 
             entity.HasOne(d => d.Vehicle).WithMany(p => p.VehicleInfoLocations)
                 .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK__VehicleIn__Vehic__793DFFAF");
+                .HasConstraintName("FK__VehicleIn__Vehic__719CDDE7");
         });
 
         modelBuilder.Entity<Zone>(entity =>

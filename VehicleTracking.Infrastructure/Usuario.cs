@@ -1,12 +1,14 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 
 namespace VehicleTracking.Infrastructure;
 
 [Table("Usuario")]
-[Index("NombreUsuario", Name = "UQ__Usuario__6B0F5AE0C0A483AA", IsUnique = true)]
-[Index("Email", Name = "UQ__Usuario__A9D10534CD59466B", IsUnique = true)]
+[Index("NombreUsuario", Name = "UQ__Usuario__6B0F5AE029CDB0D6", IsUnique = true)]
+[Index("Email", Name = "UQ__Usuario__A9D10534C6D51644", IsUnique = true)]
 public partial class Usuario
 {
     [Key]

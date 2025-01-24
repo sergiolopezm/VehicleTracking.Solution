@@ -13,5 +13,6 @@
         public string DetentionTime { get; set; } = string.Empty;
         public decimal DistanceTraveled { get; set; }
         public decimal Temperature { get; set; }
+        public decimal Angle { get; set; }
     }
 }

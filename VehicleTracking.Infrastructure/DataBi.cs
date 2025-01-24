@@ -64,6 +64,8 @@ public partial class DataBi
     [Unicode(false)]
     public string Carroceria { get; set; } = null!;
 
+    public DateOnly Created { get; set; }
+
     [Column("FECHA_REMESA")]
     [StringLength(4000)]
     public string? FechaRemesa { get; set; }

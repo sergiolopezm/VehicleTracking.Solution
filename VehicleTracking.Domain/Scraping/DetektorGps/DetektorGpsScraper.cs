@@ -527,6 +527,7 @@ public class DetektorGpsScraper : ILocationScraper
             _logger.Debug($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds}ms] Icono encontrado, haciendo clic");
 
             // Hacer clic en el icono del vehículo
+            var angle = await ExtractVehicleAngle(vehicleIcon);
             await ClickElementWithRetry(vehicleIcon);
 
             // Verificar estado antes de buscar el popup
@@ -547,7 +548,7 @@ public class DetektorGpsScraper : ILocationScraper
             await CheckPageStatus("pre-extracción de información");
 
             // Extraer y retornar la información del vehículo
-            var result = await ExtractVehicleInformation(infoWindow);
+            var result = await ExtractVehicleInformation(infoWindow, angle);
 
             _logger.Info($"[Tiempo TOTAL del proceso: {stopwatch.ElapsedMilliseconds}ms] Proceso completado exitosamente del vehículo {patent}", true);
 
@@ -1560,7 +1561,7 @@ public class DetektorGpsScraper : ILocationScraper
         }
     }
 
-    private async Task<LocationDataInfo> ExtractVehicleInformation(IWebElement infoWindow)
+    private async Task<LocationDataInfo> ExtractVehicleInformation(IWebElement infoWindow, decimal angle)
     {
         var infoText = infoWindow.Text;
         if (string.IsNullOrWhiteSpace(infoText))
@@ -1626,7 +1627,8 @@ public class DetektorGpsScraper : ILocationScraper
                 InZone = zoneMatch.Success ? zoneMatch.Groups[1].Value.Trim() : string.Empty,
                 DetentionTime = stopTimeMatch.Success ? stopTimeMatch.Groups[1].Value.Trim() : "0",
                 DistanceTraveled = ParseDecimalOrDefault(distanceMatch.Groups[1].Value),
-                Temperature = ParseDecimalOrDefault(tempMatch.Groups[1].Value)
+                Temperature = ParseDecimalOrDefault(tempMatch.Groups[1].Value),
+                Angle = angle
             };
         }
         catch (Exception ex)
@@ -2448,6 +2450,50 @@ public class DetektorGpsScraper : ILocationScraper
         {
             _logger.Error($"Error de conexión en {context}", ex);
             throw new InvalidOperationException($"SERVIDOR_CAIDO: Error de conexión en {context}", ex);
+        }
+    }
+
+    private async Task<decimal> ExtractVehicleAngle(IWebElement vehicleIcon)
+    {
+        try
+        {
+            // Primero intentar obtener el ángulo de la transformación CSS
+            var transform = vehicleIcon.GetAttribute("transform");
+            if (!string.IsNullOrEmpty(transform))
+            {
+                var match = Regex.Match(transform, @"rotate\(([-\d.]+)");
+                if (match.Success)
+                {
+                    return decimal.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+                }
+            }
+
+            // Si no hay transformación, intentar obtener el ángulo del href de la imagen
+            var href = vehicleIcon.GetAttribute("href") ?? vehicleIcon.GetAttribute("xlink:href");
+            if (!string.IsNullOrEmpty(href))
+            {
+                var directions = new Dictionary<string, decimal>
+            {
+                {"_n", 0}, {"_ne", 45}, {"_e", 90}, {"_se", 135},
+                {"_s", 180}, {"_sw", 225}, {"_w", 270}, {"_nw", 315}
+            };
+
+                foreach (var dir in directions)
+                {
+                    if (href.Contains(dir.Key, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return dir.Value;
+                    }
+                }
+            }
+
+            // Si no se puede determinar el ángulo, retornar 0
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"Error extrayendo el ángulo del vehículo", ex);
+            return 0;
         }
     }
 
