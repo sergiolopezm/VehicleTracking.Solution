@@ -1,6 +1,6 @@
 ﻿using VehicleTracking.Shared.InDTO.InDTOGps;
 
-namespace VehicleTracking.Domain.Contracts.IDetektorGps
+namespace VehicleTracking.Domain.Contracts.ISimonMovilidadGps
 {
     public interface ILocationScraper : IDisposable
     {

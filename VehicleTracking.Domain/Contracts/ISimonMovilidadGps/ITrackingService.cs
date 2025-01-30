@@ -2,7 +2,8 @@
 using VehicleTracking.Shared.InDTO.InDTOGps;
 using VehicleTracking.Shared.OutDTO.OutDTOGps;
 
-namespace VehicleTracking.Domain.Contracts.IDetektorGps
+
+namespace VehicleTracking.Domain.Contracts.ISimonMovilidadGps
 {
     public interface ITrackingService
     {

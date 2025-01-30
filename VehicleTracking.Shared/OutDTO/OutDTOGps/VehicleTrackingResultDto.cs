@@ -1,4 +1,4 @@
-﻿namespace VehicleTracking.Shared.OutDTO.DetektorGps
+﻿namespace VehicleTracking.Shared.OutDTO.OutDTOGps
 {
     public class VehicleTrackingResultDto
     {

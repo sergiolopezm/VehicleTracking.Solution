@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Text;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Support.UI;
 
@@ -30,7 +31,7 @@ namespace VehicleTracking.Utils.Helpers
             _elementMetrics = new Dictionary<string, ElementMetrics>();
         }
 
-        public async Task<IWebElement?> WaitForElementAsync(By locator, string elementId = "", bool ensureClickable = false)
+        public async Task<(IWebElement? Element, string ErrorMessage)> WaitForElementAsync(By locator, string elementId = "", bool ensureClickable = false)
         {
             elementId = string.IsNullOrEmpty(elementId) ? locator.ToString() : elementId;
             var stopwatch = new Stopwatch();
@@ -45,7 +46,7 @@ namespace VehicleTracking.Utils.Helpers
                     if (fastResult != null)
                     {
                         UpdateMetrics(elementId, stopwatch.Elapsed.TotalSeconds);
-                        return fastResult;
+                        return (fastResult, string.Empty);
                     }
                 }
 
@@ -69,29 +70,38 @@ namespace VehicleTracking.Utils.Helpers
                                 if (!elem.Displayed || !elem.Enabled)
                                     return null;
 
-                                // Verificación mejorada de clickeable
                                 var isClickable = (bool)((IJavaScriptExecutor)driver).ExecuteScript(@"
-                                    var elem = arguments[0];
-                                    var rect = elem.getBoundingClientRect();
-                                    return (
-                                        rect.width > 0 &&
-                                        rect.height > 0 &&
-                                        !elem.disabled &&
-                                        window.getComputedStyle(elem).display !== 'none' &&
-                                        window.getComputedStyle(elem).visibility !== 'hidden' &&
-                                        !document.hidden
-                                    );
-                                ", elem);
+                            var elem = arguments[0];
+                            var rect = elem.getBoundingClientRect();
+                            return (
+                                rect.width > 0 &&
+                                rect.height > 0 &&
+                                !elem.disabled &&
+                                window.getComputedStyle(elem).display !== 'none' &&
+                                window.getComputedStyle(elem).visibility !== 'hidden' &&
+                                !document.hidden
+                            );
+                        ", elem);
 
                                 return isClickable ? elem : null;
                             }
-                            catch
+                            catch (StaleElementReferenceException)
+                            {
+                                return null;
+                            }
+                            catch (NoSuchElementException)
                             {
                                 return null;
                             }
                         });
                     }
-                    catch
+                    catch (WebDriverTimeoutException)
+                    {
+                        var pageSource = _driver.PageSource;
+                        var currentUrl = _driver.Url;
+                        return null;
+                    }
+                    catch (Exception)
                     {
                         return null;
                     }
@@ -100,13 +110,38 @@ namespace VehicleTracking.Utils.Helpers
                 if (element != null)
                 {
                     UpdateMetrics(elementId, stopwatch.Elapsed.TotalSeconds);
+                    return (element, string.Empty);
                 }
 
-                return element;
+                // Construir mensaje de error detallado
+                var errorDetails = new StringBuilder();
+                errorDetails.AppendLine($"No se pudo encontrar el elemento después de {timeout} segundos.");
+                errorDetails.AppendLine($"Localizador usado: {locator}");
+
+                try
+                {
+                    var pageState = ((IJavaScriptExecutor)_driver).ExecuteScript("return document.readyState")?.ToString();
+                    errorDetails.AppendLine($"Estado de la página: {pageState}");
+
+                    var visibilityCheck = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                return {
+                    documentHidden: document.hidden,
+                    bodyDisplay: window.getComputedStyle(document.body).display,
+                    bodyVisibility: window.getComputedStyle(document.body).visibility
+                }
+            ");
+                    errorDetails.AppendLine($"Estado de visibilidad: {visibilityCheck}");
+                }
+                catch (Exception ex)
+                {
+                    errorDetails.AppendLine($"Error al obtener estado adicional: {ex.Message}");
+                }
+
+                return (null, errorDetails.ToString());
             }
-            catch
+            catch (Exception ex)
             {
-                return null;
+                return (null, $"Error inesperado: {ex.Message}\nStack Trace: {ex.StackTrace}");
             }
         }
 

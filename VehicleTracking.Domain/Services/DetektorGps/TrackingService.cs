@@ -2,8 +2,8 @@
 using VehicleTracking.Domain.Contracts;
 using VehicleTracking.Domain.Contracts.IDetektorGps;
 using VehicleTracking.Infrastructure;
-using VehicleTracking.Shared.InDTO.DetektorGps;
-using VehicleTracking.Shared.OutDTO.DetektorGps;
+using VehicleTracking.Shared.InDTO.InDTOGps;
+using VehicleTracking.Shared.OutDTO.OutDTOGps;
 using VehicleTracking.Util.Constants;
 
 public class TrackingService : ITrackingService

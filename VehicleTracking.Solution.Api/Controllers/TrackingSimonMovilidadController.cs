@@ -1,8 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using VehicleTracking.Domain.Contracts.IDetektorGps;
-using VehicleTracking.Solution.Api.Attributes;
-using VehicleTracking.Shared.GeneralDTO;
 using VehicleTracking.Domain.Contracts;
+using VehicleTracking.Domain.Contracts.ISimonMovilidadGps;
+using VehicleTracking.Shared.GeneralDTO;
+using VehicleTracking.Solution.Api.Attributes;
 
 namespace VehicleTracking.Solution.Api.Controllers
 {
@@ -11,12 +11,12 @@ namespace VehicleTracking.Solution.Api.Controllers
     [ServiceFilter(typeof(LogAttribute))]
     [ServiceFilter(typeof(AutorizacionJwtAttribute))]
     [ServiceFilter(typeof(AccesoAttribute))]
-    public class TrackingDetektorController : ControllerBase
+    public class TrackingSimonMovilidadController : ControllerBase
     {
         private readonly ITrackingService _trackingService;
         private readonly ILogRepository _logRepository;
 
-        public TrackingDetektorController(
+        public TrackingSimonMovilidadController(
             ITrackingService trackingService,
             ILogRepository logRepository)
         {
@@ -24,13 +24,7 @@ namespace VehicleTracking.Solution.Api.Controllers
             _logRepository = logRepository;
         }
 
-        /// <summary>
-        /// Inicia el proceso de tracking de vehículos
-        /// </summary>
         [HttpPost("track")]
-        [ServiceFilter(typeof(LogAttribute))]
-        [ServiceFilter(typeof(AutorizacionJwtAttribute))]
-        [ServiceFilter(typeof(AccesoAttribute))]
         [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status401Unauthorized)]
@@ -51,7 +45,6 @@ namespace VehicleTracking.Solution.Api.Controllers
                     $"Proceso de tracking completado: {results.totalRegistros} vehículos procesados"
                 );
 
-                // Preparar estadísticas para el detalle
                 var exitosos = results.lista?.Count(r => r.Success) ?? 0;
                 var fallidos = results.totalRegistros - exitosos;
                 var detalleResumen = $"Se procesaron {results.totalRegistros} vehículos en total. " +
@@ -106,7 +99,6 @@ namespace VehicleTracking.Solution.Api.Controllers
                     ex.Message
                 );
 
-                // Determinar si es un error conocido que podemos mostrar al usuario
                 var esErrorConocido = ex.Message.Contains("CONFIGURACION_INVALIDA:") ||
                                      ex.Message.Contains("Error de autenticación:") ||
                                      ex.Message.Contains("Error de validación:");
@@ -125,10 +117,10 @@ namespace VehicleTracking.Solution.Api.Controllers
             }
         }
 
-        /// <summary>
-        /// Obtiene el estado actual de un vehículo específico
-        /// </summary>
         [HttpGet("vehicle/{patent}")]
+        [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(RespuestaDto), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetVehicleStatus(string patent)
         {
             try

@@ -1,11 +1,11 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using VehicleTracking.Domain.Contracts.IDetektorGps;
+using VehicleTracking.Domain.Contracts.ISimonMovilidadGps;
 using VehicleTracking.Infrastructure;
 using VehicleTracking.Shared.InDTO.InDTOGps;
 using VehicleTracking.Util.Constants;
 
-namespace VehicleTracking.Domain.Services.DetektorGps
+namespace VehicleTracking.Domain.Services.SimonMovilidadGps
 {
     public class VehicleTrackingRepository : IVehicleTrackingRepository
     {
@@ -29,27 +29,27 @@ namespace VehicleTracking.Domain.Services.DetektorGps
                     m => m.VehicleId,
                     (v, m) => new { Vehicle = v, Manifest = m })
                 .Where(vm =>
-                    vm.Vehicle.Provider == _settings.Providers.Detektor.Name &&
+                    vm.Vehicle.Provider == _settings.Providers.SimonMovilidad.Name &&
                     vm.Manifest.Active &&
                     vm.Manifest.Process != 7 &&
                     vm.Manifest.State != 36 &&
                     vm.Manifest.State != 35)
-                    .Select(vm => new Vehicle
+                .Select(vm => new Vehicle
+                {
+                    Id = vm.Vehicle.Id,
+                    Patent = vm.Vehicle.Patent,
+                    Provider = vm.Vehicle.Provider,
+                    User = vm.Vehicle.User,
+                    Password = vm.Vehicle.Password,
+                    VehicleInfoLocations = new List<VehicleInfoLocation>
                     {
-                        Id = vm.Vehicle.Id,
-                        Patent = vm.Vehicle.Patent,
-                        Provider = vm.Vehicle.Provider,
-                        User = vm.Vehicle.User,
-                        Password = vm.Vehicle.Password,
-                        VehicleInfoLocations = new List<VehicleInfoLocation>
-                        {
                         new VehicleInfoLocation
                         {
                             ManifestId = vm.Manifest.Id,
                             IsActive = true
                         }
-                        }
-                    })
+                    }
+                })
                 .ToListAsync();
 
             return vehicles;

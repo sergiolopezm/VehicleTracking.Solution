@@ -1,4 +1,4 @@
-﻿namespace VehicleTracking.Shared.InDTO.DetektorGps
+﻿namespace VehicleTracking.Shared.InDTO.InDTOGps
 {
     public class TrackingSettings
     {
@@ -10,6 +10,7 @@
     public class ProvidersConfig
     {
         public ProviderConfig Detektor { get; set; } = null!;
+        public ProviderConfig SimonMovilidad { get; set; } = null!;
     }
 
     public class ProviderConfig

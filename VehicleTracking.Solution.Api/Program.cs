@@ -2,25 +2,22 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using VehicleTracking.Domain.Contracts;
-using VehicleTracking.Domain.Contracts.IDetektorGps;
 using VehicleTracking.Domain.Services;
-using VehicleTracking.Domain.Services.DetektorGps;
 using VehicleTracking.Infrastructure;
 using VehicleTracking.Shared.InDTO;
-using VehicleTracking.Shared.InDTO.DetektorGps;
+using VehicleTracking.Shared.InDTO.InDTOGps;
 using VehicleTracking.Solution.Api.Attributes;
 using VehicleTracking.Util.Helpers;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Configuración de CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll",
@@ -33,14 +30,21 @@ builder.Services.AddCors(options =>
         });
 });
 
-// Configuración de la base de datos
+// Database configuration
 builder.Services.AddDbContextFactory<DBContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection"),
-        x => x.UseNetTopologySuite()
+        x => {
+            x.UseNetTopologySuite();
+            x.EnableRetryOnFailure(
+                maxRetryCount: 3,
+                maxRetryDelay: TimeSpan.FromSeconds(30),
+                errorNumbersToAdd: null
+            );
+        }
     ));
 
-// Configuración de JWT
+// JWT Configuration
 var jwtSettings = builder.Configuration.GetSection("JwtSettings");
 var key = Encoding.UTF8.GetBytes(jwtSettings["Key"]!);
 
@@ -63,36 +67,93 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-// Configuración de settings
+// Settings Configuration
 builder.Services.Configure<UsuarioSettings>(
-    builder.Configuration.GetSection("UsuarioSettings")
+   builder.Configuration.GetSection("UsuarioSettings")
 );
 
 builder.Services.Configure<TrackingSettings>(
-    builder.Configuration.GetSection("TrackingSettings")
+   builder.Configuration.GetSection("TrackingSettings")
 );
 
-// Registro de servicios principales
+// Core Services
 builder.Services.AddScoped<IAccesoRepository, AccesoRepository>();
 builder.Services.AddScoped<ILogRepository, LogRepository>();
 builder.Services.AddScoped<IUsuarioRepository, UsuarioRepository>();
 builder.Services.AddScoped<ITokenRepository, TokenRepository>();
 builder.Services.AddScoped<IConstantesService, ConstantesService>();
 
-// Registro de servicios de logging
+// Logging Services
 builder.Services.AddSingleton<FileLoggerService>();
 builder.Services.AddScoped<IFileLogger, FileLoggerAdapter>();
 builder.Services.AddScoped<IRepositoryLogger, LogRepositoryAdapter>();
 
-// Registro de servicios de tracking
-builder.Services.AddScoped<ILocationScraperFactory, LocationScraperFactory>();
-builder.Services.AddScoped<IVehicleTrackingRepository, VehicleTrackingRepository>();
-builder.Services.AddScoped<ITrackingService, TrackingService>();
+// Detektor GPS Services
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.IDetektorGps.ILocationScraperFactory>(sp => {
+    var fileLogger = sp.GetRequiredService<IFileLogger>();
+    var logRepository = sp.GetRequiredService<IRepositoryLogger>();
+    var settings = sp.GetRequiredService<IOptions<TrackingSettings>>();
+    return new VehicleTracking.Domain.Services.DetektorGps.LocationScraperFactory(
+        fileLogger,
+        logRepository,
+        settings
+    );
+});
 
-// Configuraciones adicionales para Selenium
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.IDetektorGps.IVehicleTrackingRepository,
+   VehicleTracking.Domain.Services.DetektorGps.VehicleTrackingRepository>();
+
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.IDetektorGps.ITrackingService>(sp => {
+    var factory = sp.GetRequiredService<VehicleTracking.Domain.Contracts.IDetektorGps.ILocationScraperFactory>();
+    var repository = sp.GetRequiredService<VehicleTracking.Domain.Contracts.IDetektorGps.IVehicleTrackingRepository>();
+    var logRepository = sp.GetRequiredService<ILogRepository>();
+    var contextFactory = sp.GetRequiredService<IDbContextFactory<DBContext>>();
+    return new TrackingService(
+        repository,
+        factory,
+        logRepository,
+        contextFactory
+    );
+});
+
+// Simon Movilidad GPS Services
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.ILocationScraperFactory>(sp => {
+    var fileLogger = sp.GetRequiredService<IFileLogger>();
+    var logRepository = sp.GetRequiredService<IRepositoryLogger>();
+    var settings = sp.GetRequiredService<IOptions<TrackingSettings>>();
+    return new VehicleTracking.Domain.Services.SimonMovilidadGps.LocationScraperFactory(
+        fileLogger,
+        logRepository,
+        settings
+    );
+});
+
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.IVehicleTrackingRepository>(sp => {
+    var contextFactory = sp.GetRequiredService<IDbContextFactory<DBContext>>();
+    var settings = sp.GetRequiredService<IOptions<TrackingSettings>>();
+    return new VehicleTracking.Domain.Services.SimonMovilidadGps.VehicleTrackingRepository(
+        contextFactory,
+        settings
+    );
+});
+
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.ITrackingService>(sp => {
+    var factory = sp.GetRequiredService<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.ILocationScraperFactory>();
+    var repository = sp.GetRequiredService<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.IVehicleTrackingRepository>();
+    var logRepository = sp.GetRequiredService<ILogRepository>();
+    var contextFactory = sp.GetRequiredService<IDbContextFactory<DBContext>>();
+    return new VehicleTracking.Domain.Services.SimonMovilidadGps.TrackingService(
+        repository,
+        factory,
+        logRepository,
+        contextFactory
+    );
+});
+
+// Additional configurations for Selenium
 builder.Services.AddHttpClient();
 
-// Configuración del tiempo máximo de ejecución para las solicitudes
+// Configure request execution timeout
 builder.Services.Configure<IISServerOptions>(options =>
 {
     options.MaxRequestBodySize = int.MaxValue;
@@ -101,15 +162,17 @@ builder.Services.Configure<IISServerOptions>(options =>
 builder.Services.Configure<KestrelServerOptions>(options =>
 {
     options.Limits.MaxRequestBodySize = int.MaxValue;
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(5);
 });
 
-// Registro de filtros y atributos
+// Register filters and attributes
 builder.Services.AddScoped<AccesoAttribute>();
 builder.Services.AddScoped<AutorizacionJwtAttribute>();
 builder.Services.AddScoped<LogAttribute>();
 builder.Services.AddScoped<ValidarModeloAttribute>();
 
-// Configuración de filtros globales en los controladores
+// Configure global controller filters
 builder.Services.AddControllers(options =>
 {
     options.Filters.AddService<LogAttribute>();
@@ -117,23 +180,19 @@ builder.Services.AddControllers(options =>
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-// Middleware pipeline
 app.UseHttpsRedirection();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Manejo global de excepciones
 app.UseExceptionHandler("/Error");
 app.UseHsts();
 
 app.MapControllers();
-
 app.Run();

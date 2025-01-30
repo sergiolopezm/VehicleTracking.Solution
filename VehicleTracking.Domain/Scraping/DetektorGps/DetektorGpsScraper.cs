@@ -1,16 +1,13 @@
 ﻿using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Interactions;
 using OpenQA.Selenium.Support.UI;
-using VehicleTracking.Domain.Contracts;
 using VehicleTracking.Domain.Contracts.IDetektorGps;
-using VehicleTracking.Domain.Services;
-using VehicleTracking.Shared.InDTO.DetektorGps;
+using VehicleTracking.Shared.InDTO.InDTOGps;
 using VehicleTracking.Util.Helpers;
 using VehicleTracking.Utils.Helpers;
 
@@ -49,6 +46,7 @@ public class DetektorGpsScraper : ILocationScraper
             options.AddArgument("--disable-popup-blocking");
             options.AddUserProfilePreference("credentials_enable_service", false);
             options.AddUserProfilePreference("profile.password_manager_enabled", false);
+
             if (_seleniumConfig.Headless)
             {
                 options.AddArgument("--headless");
@@ -84,55 +82,55 @@ public class DetektorGpsScraper : ILocationScraper
             // Validar que las credenciales no estén vacías
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
             {
-                _logger.Warning("Credenciales inválidas: usuario o contraseña están vacíos", true);
+                _logger.Warning($"Credenciales inválidas para el vehículo {_currentPatent}: usuario o contraseña están vacíos", true);
                 return false;
             }
 
-            _logger.Debug("Iniciando proceso de login...");
+            _logger.Debug($"Iniciando proceso de login para vehículo {_currentPatent}");
             var dynamicWait = new DynamicWaitHelper(_driver);
 
             _logger.Debug("Navegando a la URL base...");
             _driver.Navigate().GoToUrl(_config.BaseUrl);
 
-            // Verificar estado de la página después de navegar
             await CheckPageStatus("navegación inicial");
 
             _logger.Debug("Esperando que la página cargue completamente...");
             await dynamicWait.WaitForPageLoadAsync();
 
             _logger.Debug("Buscando campo de usuario...");
-            var userInput = await dynamicWait.WaitForElementAsync(
+            var (userInput, userError) = await dynamicWait.WaitForElementAsync(
                 By.CssSelector("input[name='username'].form-control"),
                 "login_username",
-                ensureClickable: true);
+                ensureClickable: true
+            );
 
             if (userInput == null)
             {
-                _logger.Warning("No se pudo encontrar el campo de usuario", true);
+                _logger.Warning($"No se pudo encontrar el campo de usuario para el vehículo {_currentPatent}. Detalles del error: {userError}", true);
                 return false;
             }
 
             _logger.Debug("Buscando campo de contraseña...");
-            var passInput = await dynamicWait.WaitForElementAsync(
+            var (passInput, passError) = await dynamicWait.WaitForElementAsync(
                 By.CssSelector("input[name='password'].form-control"),
                 "login_password",
                 ensureClickable: true);
 
             if (passInput == null)
             {
-                _logger.Warning("No se pudo encontrar el campo de contraseña", true);
+                _logger.Warning($"No se pudo encontrar el campo de contraseña para el vehículo {_currentPatent}. Detalles del error: {passError}", true);
                 return false;
             }
 
             _logger.Debug("Buscando botón de login...");
-            var loginButton = await dynamicWait.WaitForElementAsync(
+            var (loginButton, buttonError ) = await dynamicWait.WaitForElementAsync(
                 By.Id("initSession"),
                 "login_button",
                 ensureClickable: true);
 
             if (loginButton == null)
             {
-                _logger.Warning("No se pudo encontrar el botón de inicio de sesión", true);
+                _logger.Warning($"No se pudo encontrar el botón de inicio de sesión para el vehículo {_currentPatent}. Detalles del error: {buttonError}", true);
                 return false;
             }
 
@@ -220,7 +218,7 @@ public class DetektorGpsScraper : ILocationScraper
                     }
 
                     // Intentar verificar el menú con diferentes selectores
-                    var menuElement = await dynamicWait.WaitForElementAsync(
+                    var (menuElement, _) = await dynamicWait.WaitForElementAsync(
                         By.CssSelector("td.myMenu, div.myMenu, .myMenu"),
                         "post_login_menu",
                         ensureClickable: false
@@ -301,7 +299,8 @@ public class DetektorGpsScraper : ILocationScraper
         }
         catch (Exception ex)
         {
-            _logger.Error($"Error durante el proceso de login para usuario: {username}", ex);
+
+            _logger.Error($"Error durante el proceso de login para usuario: {username} y vehículo {_currentPatent}", ex);
             return false;
         }
     }
@@ -1693,7 +1692,7 @@ public class DetektorGpsScraper : ILocationScraper
                 try
                 {
                     // Intentar encontrar el elemento con cada selector
-                    var element = await dynamicWait.WaitForElementAsync(selector, ensureClickable: true);
+                    var (element, _) = await dynamicWait.WaitForElementAsync(selector, ensureClickable: true);
                     if (element != null && element.Displayed && element.Enabled)
                     {
                         // Verificar si el elemento es realmente visible y clickeable

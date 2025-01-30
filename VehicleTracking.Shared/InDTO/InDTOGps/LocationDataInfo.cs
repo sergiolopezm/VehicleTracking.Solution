@@ -1,4 +1,4 @@
-﻿namespace VehicleTracking.Shared.InDTO.DetektorGps
+﻿namespace VehicleTracking.Shared.InDTO.InDTOGps
 {
     public class LocationDataInfo
     {
