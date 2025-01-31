@@ -10,7 +10,11 @@
 
 ## 1. DESCRIPCIÓN GENERAL
 
-El servicio Vehicle Tracking proporciona una API para realizar el seguimiento y monitoreo de vehículos a través de la plataforma Detektor GPS. El sistema permite la autenticación de usuarios, gestión de tokens, y operaciones de tracking en tiempo real.
+El servicio Vehicle Tracking proporciona una API para realizar el seguimiento y monitoreo de vehículos a través de dos plataformas:
+- Detektor GPS
+- Simón Movilidad
+
+El sistema permite la autenticación de usuarios, gestión de tokens, y operaciones de tracking en tiempo real para ambos proveedores.
 
 ## 2. REQUISITOS PREVIOS
 
@@ -121,7 +125,9 @@ Es necesario insertar los siguientes registros iniciales:
 
 ```sql
 INSERT INTO [dbo].[Acceso] ([Sitio], [Contraseña])
-VALUES ('Detektor', '12345');
+VALUES 
+('Detektor', '12345'),
+('SimonMovilidad', '12345');
 
 INSERT INTO [dbo].[Usuario] (
     [IdUsuario], [NombreUsuario], [Contraseña], [Nombre], [Apellido], 
@@ -198,23 +204,27 @@ Ejemplo de salida:
 
 ### 3.2. Tracking de Vehículos
 
-#### 3.2.1. TrackVehicles
+#### 3.2.1. Detektor GPS Tracking
 
-Inicia el proceso de tracking para todos los vehículos activos.
+##### 3.2.1.1. TrackVehicles (Detektor)
 
-Acceso: `api/Tracking/track`  
+Inicia el proceso de tracking para vehículos Detektor.
+
+Acceso: `api/TrackingDetektor/track`  
 Formato: JSON  
 Servicio: REST / POST  
 Autenticación: JWT requerido
 
-##### 3.2.1.1. Headers Requeridos
+###### Headers Requeridos
 
 | **Nombre** | **Descripción** | **Requerido** |
 |------------|-----------------|---------------|
 | Authorization | Token JWT (Bearer) | Sí |
 | IdUsuario | ID del usuario autenticado | Sí |
+| Sitio | Identificador del sitio | Sí |
+| Clave | Clave de acceso al sitio | Sí |
 
-##### 3.2.1.2. Parámetros de Salida
+###### Parámetros de Salida
 
 | **Nombre** | **Descripción** | **Tipo** |
 |------------|-----------------|-----------|
@@ -243,7 +253,7 @@ Ejemplo de salida:
 ```json
 {
   "exito": true,
-  "mensaje": "Proceso de tracking",
+  "mensaje": "Proceso de tracking Detektor",
   "detalle": "Se procesaron 10 vehículos en total. Exitosos: 8, Con errores: 2",
   "resultado": {
     "estadisticas": {
@@ -271,29 +281,31 @@ Ejemplo de salida:
 }
 ```
 
-#### 3.2.2. GetVehicleStatus
+##### 3.2.1.2. GetVehicleStatus (Detektor)
 
-Obtiene el estado actual de un vehículo específico.
+Obtiene el estado actual de un vehículo específico en Detektor.
 
-Acceso: `api/Tracking/vehicle/{patent}`  
+Acceso: `api/TrackingDetektor/vehicle/{patent}`  
 Formato: JSON  
 Servicio: REST / GET  
 Autenticación: JWT requerido
 
-##### 3.2.2.1. Parámetros de Ruta
+###### Parámetros de Ruta
 
 | **Nombre** | **Descripción** | **Tipo** | **Requerido** |
 |------------|-----------------|----------|---------------|
 | patent | Patente del vehículo | String | Sí |
 
-##### 3.2.2.2. Headers Requeridos
+###### Headers Requeridos
 
 | **Nombre** | **Descripción** | **Requerido** |
 |------------|-----------------|---------------|
 | Authorization | Token JWT (Bearer) | Sí |
 | IdUsuario | ID del usuario autenticado | Sí |
+| Sitio | Identificador del sitio | Sí |
+| Clave | Clave de acceso al sitio | Sí |
 
-##### 3.2.2.3. Parámetros de Salida
+###### Parámetros de Salida
 
 | **Nombre** | **Descripción** | **Tipo** |
 |------------|-----------------|-----------|
@@ -312,12 +324,13 @@ Autenticación: JWT requerido
 | resultado.detentionTime | Tiempo de detención (si aplica) | String |
 | resultado.distanceTraveled | Distancia recorrida en km | Decimal |
 | resultado.temperature | Temperatura registrada | Decimal |
+| resultado.angle | Ángulo de orientación del vehículo | Decimal |
 
 Ejemplo de salida:
 ```json
 {
   "exito": true,
-  "mensaje": "Información de vehículo",
+  "mensaje": "Información de vehículo Detektor",
   "detalle": "Información obtenida exitosamente para el vehículo ABC123",
   "resultado": {
     "latitude": -34.123456,
@@ -330,7 +343,153 @@ Ejemplo de salida:
     "inZone": "Zona Norte",
     "detentionTime": "0",
     "distanceTraveled": 150.5,
-    "temperature": 25.5
+    "temperature": 25.5,
+    "angle": 45.0
+  }
+}
+```
+
+#### 3.2.2. Simón Movilidad Tracking
+
+##### 3.2.2.1. TrackVehicles (Simón Movilidad)
+
+Inicia el proceso de tracking para vehículos Simón Movilidad.
+
+Acceso: `api/TrackingSimonMovilidad/track`  
+Formato: JSON  
+Servicio: REST / POST  
+Autenticación: JWT requerido
+
+###### Headers Requeridos
+
+| **Nombre** | **Descripción** | **Requerido** |
+|------------|-----------------|---------------|
+| Authorization | Token JWT (Bearer) | Sí |
+| IdUsuario | ID del usuario autenticado | Sí |
+| Sitio | Identificador del sitio | Sí |
+| Clave | Clave de acceso al sitio | Sí |
+
+###### Parámetros de Salida
+
+| **Nombre** | **Descripción** | **Tipo** |
+|------------|-----------------|-----------|
+| exito | Indica si la operación fue exitosa | Boolean |
+| mensaje | Mensaje general de la operación | String |
+| detalle | Descripción detallada del resultado | String |
+| resultado | Objeto con resultados del tracking | Object |
+| resultado.estadisticas | Resumen estadístico del proceso | Object |
+| resultado.estadisticas.totalProcesados | Total de vehículos procesados | Integer |
+| resultado.estadisticas.procesadosExitosamente | Cantidad de procesamientos exitosos | Integer |
+| resultado.estadisticas.procesadosConError | Cantidad de procesamientos fallidos | Integer |
+| resultado.resultados | Objeto con lista paginada de resultados | Object |
+| resultado.resultados.lista | Lista de resultados individuales | Array |
+| resultado.resultados.lista[].patent | Patente del vehículo | String |
+| resultado.resultados.lista[].success | Indicador de éxito individual | Boolean |
+| resultado.resultados.lista[].message | Mensaje del resultado individual | String |
+| resultado.resultados.lista[].processedAt | Fecha y hora del procesamiento | DateTime |
+| resultado.resultados.lista[].latitude | Latitud registrada | Decimal |
+| resultado.resultados.lista[].longitude | Longitud registrada | Decimal |
+| resultado.resultados.lista[].status | Estado del procesamiento | String |
+| resultado.resultados.pagina | Número de página actual | Integer |
+| resultado.resultados.totalPaginas | Total de páginas disponibles | Integer |
+| resultado.resultados.totalRegistros | Total de registros procesados | Integer |
+
+Ejemplo de salida:
+```json
+{
+  "exito": true,
+  "mensaje": "Proceso de tracking Simón Movilidad",
+  "detalle": "Se procesaron 5 vehículos en total. Exitosos: 4, Con errores: 1",
+  "resultado": {
+    "estadisticas": {
+      "totalProcesados": 5,
+      "procesadosExitosamente": 4,
+      "procesadosConError": 1
+    },
+    "resultados": {
+      "lista": [
+        {
+          "patent": "XYZ789",
+          "success": true,
+          "message": "Ubicación registrada exitosamente",
+          "processedAt": "2024-01-17T11:45:00",
+          "latitude": -34.654321,
+          "longitude": -58.654321,
+          "status": "Procesado"
+        }
+      ],
+      "pagina": 1,
+      "totalPaginas": 1,
+      "totalRegistros": 5
+    }
+  }
+}
+```
+
+##### 3.2.2.2. GetVehicleStatus (Simón Movilidad)
+
+Obtiene el estado actual de un vehículo específico en Simón Movilidad.
+
+Acceso: `api/TrackingSimonMovilidad/vehicle/{patent}`  
+Formato: JSON  
+Servicio: REST / GET  
+Autenticación: JWT requerido
+
+###### Parámetros de Ruta
+
+| **Nombre** | **Descripción** | **Tipo** | **Requerido** |
+|------------|-----------------|----------|---------------|
+| patent | Patente del vehículo | String | Sí |
+
+###### Headers Requeridos
+
+| **Nombre** | **Descripción** | **Requerido** |
+|------------|-----------------|---------------|
+| Authorization | Token JWT (Bearer) | Sí |
+| IdUsuario | ID del usuario autenticado | Sí |
+| Sitio | Identificador del sitio | Sí |
+| Clave | Clave de acceso al sitio | Sí |
+
+###### Parámetros de Salida
+
+| **Nombre** | **Descripción** | **Tipo** |
+|------------|-----------------|-----------|
+| exito | Indica si la operación fue exitosa | Boolean |
+| mensaje | Mensaje general de la operación | String |
+| detalle | Descripción detallada del resultado | String |
+| resultado | Objeto con información del vehículo | Object |
+| resultado.latitude | Latitud actual del vehículo | Decimal |
+| resultado.longitude | Longitud actual del vehículo | Decimal |
+| resultado.speed | Velocidad actual en km/h | Decimal |
+| resultado.timestamp | Fecha y hora de la última actualización | DateTime |
+| resultado.reason | Motivo del último estado registrado | String |
+| resultado.driver | Nombre del conductor | String |
+| resultado.georeference | Referencia geográfica actual | String |
+| resultado.inZone | Zona actual del vehículo | String |
+| resultado.detentionTime | Tiempo de detención (si aplica) | String |
+| resultado.distanceTraveled | Distancia recorrida en km | Decimal |
+| resultado.temperature | Temperatura registrada | Decimal |
+| resultado.angle | Ángulo de orientación del vehículo | Decimal |
+
+Ejemplo de salida:
+```json
+{
+  "exito": true,
+  "mensaje": "Información de vehículo Simón Movilidad",
+  "detalle": "Información obtenida exitosamente para el vehículo XYZ789",
+  "resultado": {
+    "latitude": -34.654321,
+    "longitude": -58.654321,
+    "speed": 45.8,
+    "timestamp": "2024-01-17T11:45:00",
+    "reason": "En ruta",
+    "driver": "María González",
+    "georeference": "Ruta 9 km 53",
+    "inZone": "Zona Sur",
+    "detentionTime": "0",
+    "distanceTraveled": 234.7,
+    "temperature": 27.3,
+    "angle": 180.0
   }
 }
 ```
@@ -359,6 +518,13 @@ El sistema requiere la siguiente configuración en el archivo appsettings.json:
         "PollingIntervalSeconds": 300,
         "MaxRetryAttempts": 3,
         "TimeoutSeconds": 60
+      },
+      "SimonMovilidad": {
+        "Name": "SIMÓN MOVILIDAD",
+        "BaseUrl": "https://www.simonmovilidad.com/app/login",
+        "PollingIntervalSeconds": 300,
+        "MaxRetryAttempts": 3,
+        "TimeoutSeconds": 60
       }
     },
     "Selenium": {
@@ -371,69 +537,229 @@ El sistema requiere la siguiente configuración en el archivo appsettings.json:
 }
 ```
 
-### 4.2. Dependencias
+### 4.2. Diferencias entre Proveedores
+
+#### 4.2.1. Detektor Security S.A.S
+- Interfaz web tradicional basada en frames
+- Navegación compleja entre diferentes secciones
+- Sistema de popup para información del vehículo
+- Información detallada sobre ángulos y ubicación
+- Autenticación basada en sesiones web
+- Mayor cantidad de datos históricos disponibles
+- Mejor precisión en coordenadas geográficas
+
+#### 4.2.2. Simón Movilidad
+- Interfaz web moderna basada en React
+- Navegación simplificada y directa
+- Panel lateral para información del vehículo
+- Mapas interactivos con marcadores en tiempo real
+- Autenticación basada en tokens
+- Actualizaciones más frecuentes de posición
+- Mejor rendimiento en tiempo real
+
+### 4.3. Dependencias
 
 El sistema requiere las siguientes dependencias principales:
 
-- Selenium WebDriver
-- ChromeDriver
-- Entity Framework Core
+#### 4.3.1. Dependencias Comunes
+- Entity Framework Core 6.0 o superior
+- Microsoft.AspNetCore.Authentication.JwtBearer
+- Microsoft.EntityFrameworkCore.SqlServer
 - NetTopologySuite
-- JWT Bearer Authentication
+- Serilog para logging avanzado
 
-### 4.3. Seguridad
+#### 4.3.2. Dependencias Específicas para Detektor
+- Selenium.WebDriver 4.8 o superior
+- Selenium.Support
+- Selenium.WebDriver.ChromeDriver (versión compatible con Chrome instalado)
+- DotNetSeleniumExtras.WaitHelpers
+- OpenQA.Selenium.Support.UI
 
-- Todas las operaciones requieren autenticación mediante JWT
-- Los tokens tienen una validez limitada configurada en JwtSettings
-- Se registran todas las operaciones en la tabla de Logs
-- Se implementa manejo de tokens expirados
-- Se valida la IP del cliente en cada operación
+#### 4.3.3. Dependencias Específicas para Simón Movilidad
+- HtmlAgilityPack
+- Newtonsoft.Json
+- Microsoft.AspNetCore.SignalR.Client (para actualizaciones en tiempo real)
+- Leaflet.js (para mapas interactivos)
 
-### 4.4. Manejo de Errores
+### 4.4. Seguridad
 
-El sistema implementa los siguientes códigos de respuesta HTTP:
+#### 4.4.1. Autenticación y Autorización
+- JWT (JSON Web Tokens) para autenticación de API
+- Tokens con tiempo de expiración configurable
+- Validación de IP en cada solicitud
+- Registro de intentos de acceso fallidos
+- Bloqueo automático después de múltiples intentos fallidos
+- Rotación automática de tokens
 
+#### 4.4.2. Almacenamiento Seguro
+- Encriptación de credenciales en base de datos
+- Separación de tokens activos y expirados
+- Limpieza automática de tokens antiguos
+- Registro de auditoría completo
+
+#### 4.4.3. Comunicación
+- HTTPS obligatorio para todas las comunicaciones
+- Certificados SSL/TLS actualizados
+- Headers de seguridad configurados
+- Prevención de CSRF
+- Limitación de rate (throttling)
+
+### 4.5. Manejo de Errores
+
+#### 4.5.1. Códigos de Respuesta HTTP
 - 200: Operación exitosa
 - 400: Error de validación o solicitud incorrecta
 - 401: Error de autenticación
 - 403: Error de autorización
+- 404: Recurso no encontrado
+- 429: Demasiadas solicitudes
 - 500: Error interno del servidor
-- 503: Error de conectividad con el servidor de tracking
+- 503: Error de conectividad con el proveedor de tracking
 
-### 4.5. Limitaciones
+#### 4.5.2. Tipos de Errores Específicos por Proveedor
 
-- El sistema está diseñado para funcionar con Chrome/Chromium
-- Requiere acceso a Internet para conectarse al servicio de Detektor
-- Las credenciales de Detektor deben estar configuradas en la base de datos
-- El servicio debe ejecutarse en un ambiente Windows
+##### Detektor Security S.A.S
+```json
+{
+  "exito": false,
+  "mensaje": "Error de conexión Detektor",
+  "detalle": "Error específico del proveedor",
+  "codigoError": "DET_001",
+  "errores": {
+    "tipo": "CONEXION",
+    "descripcion": "No se pudo establecer conexión con el servidor Detektor",
+    "recomendacion": "Verificar conectividad y credenciales"
+  }
+}
+```
 
-## 5. SOLUCIÓN DE PROBLEMAS
+##### Simón Movilidad
+```json
+{
+  "exito": false,
+  "mensaje": "Error de autenticación Simón Movilidad",
+  "detalle": "Error específico del proveedor",
+  "codigoError": "SM_001",
+  "errores": {
+    "tipo": "AUTENTICACION",
+    "descripcion": "Token de acceso expirado",
+    "recomendacion": "Renovar credenciales de acceso"
+  }
+}
+```
 
-### 5.1. Problemas Comunes
+### 4.6. Solución de Problemas
 
-1. Error de ChromeDriver:
-   - Verificar que ChromeDriver está instalado y accesible
-   - Comprobar compatibilidad de versiones con Chrome
+#### 4.6.1. Problemas Comunes y Soluciones
 
-2. Error de autenticación:
-   - Verificar credenciales en tabla Acceso
-   - Comprobar formato del token JWT
+##### Detektor Security S.A.S
 
-3. Error de tracking:
-   - Verificar conectividad con Detektor
-   - Comprobar estado de las credenciales de vehículos
-   - Revisar logs para detalles específicos
+| Problema | Causa Probable | Solución |
+|----------|---------------|-----------|
+| Error de frames | Cambios en la estructura del sitio | Actualizar selectores de Selenium |
+| Timeout en carga | Red lenta o servidor sobrecargado | Aumentar timeouts en configuración |
+| Error de coordenadas | Fallo en extracción del mapa | Verificar formato de respuesta |
+| Sesión inválida | Expiración de cookies | Implementar reintento con nuevas credenciales |
+| Error de popup | Bloqueo del navegador | Configurar Chrome para permitir popups |
 
-### 5.2. Logs
+##### Simón Movilidad
 
-El sistema implementa logging en dos niveles:
+| Problema | Causa Probable | Solución |
+|----------|---------------|-----------|
+| Token expirado | Tiempo de sesión excedido | Renovar token automáticamente |
+| Error de API | Límite de rate excedido | Implementar exponential backoff |
+| Mapa no carga | Problema con Leaflet | Verificar carga de recursos externos |
+| Datos desactualizados | Caché del navegador | Forzar recarga de datos |
+| WebSocket cerrado | Timeout de conexión | Reconectar automáticamente |
 
-1. Archivo:
-   - Ubicación: Carpeta Logs en la raíz del proyecto
-   - Formato: {fecha}.txt
-   - Contiene detalles técnicos y trazas de error
+#### 4.6.2. Logging y Diagnóstico
 
-2. Base de datos:
-   - Tabla: Log
-   - Registra operaciones de negocio y errores críticos
-   - Permite seguimiento de auditoría
+##### 4.6.2.1. Estructura de Logs
+```json
+{
+  "timestamp": "2024-01-31T10:00:00Z",
+  "level": "ERROR",
+  "provider": "DETEKTOR",
+  "operation": "TRACK_VEHICLE",
+  "vehicleId": "ABC123",
+  "error": {
+    "code": "DET_001",
+    "message": "Error de conexión",
+    "stackTrace": "...",
+    "context": {
+      "attempt": 2,
+      "lastSuccess": "2024-01-31T09:55:00Z",
+      "browserInfo": "Chrome 120.0.0"
+    }
+  }
+}
+```
+
+##### 4.6.2.2. Niveles de Log
+- DEBUG: Información detallada para desarrollo
+- INFO: Operaciones normales del sistema
+- WARNING: Situaciones anómalas pero no críticas
+- ERROR: Errores que requieren atención
+- FATAL: Errores que impiden la operación del sistema
+
+### 4.7. Comparativa Detallada de Proveedores
+
+#### 4.7.1. Rendimiento
+
+| Aspecto | Detektor | Simón Movilidad |
+|---------|----------|-----------------|
+| Tiempo de respuesta promedio | 2-3 segundos | 0.5-1 segundo |
+| Frecuencia de actualización | Cada 5 minutos | Cada 30 segundos |
+| Precisión de coordenadas | ±5 metros | ±10 metros |
+| Uso de recursos | Alto | Medio |
+| Confiabilidad | 99.9% | 99.5% |
+
+#### 4.7.2. Características
+
+| Característica | Detektor | Simón Movilidad |
+|----------------|----------|-----------------|
+| Histórico de rutas | Completo | Últimas 24h |
+| Alertas en tiempo real | Sí | Sí |
+| Geofencing | Avanzado | Básico |
+| Reportes personalizados | Sí | Limitado |
+| API REST | No | Sí |
+| Exportación de datos | Múltiples formatos | Solo CSV |
+
+#### 4.7.3. Recomendaciones de Uso
+
+##### Usar Detektor cuando:
+- Se requiere máxima precisión en coordenadas
+- Es necesario acceder a histórico completo
+- Se necesitan reportes detallados
+- El monitoreo es crítico para la operación
+- Se requieren funciones avanzadas de geofencing
+
+##### Usar Simón Movilidad cuando:
+- La prioridad es el tiempo real
+- Se necesita una interfaz moderna y responsiva
+- El volumen de vehículos es alto
+- Se requiere integración vía API
+- Los recursos del servidor son limitados
+
+### 4.8. Mejores Prácticas
+
+#### 4.8.1. Implementación
+- Usar patrón Repository para acceso a datos
+- Implementar caché para reducir llamadas al proveedor
+- Manejar reintentos con exponential backoff
+- Implementar circuit breaker para llamadas externas
+- Mantener logs detallados de operaciones
+
+#### 4.8.2. Monitoreo
+- Configurar alertas para errores críticos
+- Monitorear tiempo de respuesta de proveedores
+- Verificar uso de recursos periódicamente
+- Implementar health checks
+- Mantener métricas de uso y rendimiento
+
+#### 4.8.3. Mantenimiento
+- Actualizar ChromeDriver regularmente
+- Revisar y ajustar timeouts según necesidad
+- Limpiar logs y datos históricos antiguos
+- Mantener documentación actualizada
+- Realizar pruebas de carga periódicas
