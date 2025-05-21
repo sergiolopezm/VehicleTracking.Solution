@@ -44,13 +44,18 @@ public class DetektorGpsScraper : ILocationScraper
             options.AddArgument($"--window-size={_seleniumConfig.WindowSize}");
             options.AddArgument("--disable-notifications");
             options.AddArgument("--disable-popup-blocking");
+            options.AddArgument("--disable-features=PasswordManagerLeakDetection,PasswordElement,PasswordProtectionWarning,AutofillServerCommunication");
+            options.AddArgument("--disable-blink-features=CredentialManagerAPI"); // evita autocompletado interno
+            options.AddUserProfilePreference("safebrowsing.enabled", false);      // desactiva Password Leak Detection
+            options.AddArgument("--guest");
             options.AddUserProfilePreference("credentials_enable_service", false);
             options.AddUserProfilePreference("profile.password_manager_enabled", false);
 
-            if (_seleniumConfig.Headless)
-            {
-                options.AddArgument("--headless");
-            }
+            // COMENTAR O ELIMINAR ESTA CONDICIÓN PARA FORZAR MODO VISIBLE
+            //if (_seleniumConfig.Headless)
+            //{
+            //    options.AddArgument("--headless");
+            //}
 
             var chromeDriverService = string.IsNullOrEmpty(_seleniumConfig.ChromeDriverPath)
                 ? ChromeDriverService.CreateDefaultService()
@@ -59,6 +64,11 @@ public class DetektorGpsScraper : ILocationScraper
             chromeDriverService.HideCommandPromptWindow = true;
 
             _driver = new ChromeDriver(chromeDriverService, options);
+
+            // AÑADIR ESTAS LÍNEAS PARA MAXIMIZAR LA VENTANA Y CONFIGURAR TIMEOUTS
+            _driver.Manage().Window.Maximize();
+            _driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(10);
+
             _wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_config.TimeoutSeconds));
             _isLoggedIn = false;
 
@@ -157,6 +167,9 @@ public class DetektorGpsScraper : ILocationScraper
                 IJavaScriptExecutor js = (IJavaScriptExecutor)_driver;
                 js.ExecuteScript("arguments[0].click();", loginButton);
             }
+
+            // Manejar posible popup de contraseña
+            await HandleChromePasswordWarningIfPresent();
 
             // Verificar si hay errores de login visibles
             await Task.Delay(1000);
@@ -261,6 +274,9 @@ public class DetektorGpsScraper : ILocationScraper
                         {
                             _logger.Info("Login verificado por URL y estado de página", true);
                             _isLoggedIn = true;
+
+                            await HandleChangePasswordPopupIfPresent();
+
                             return true;
                         }
                     }
@@ -316,6 +332,10 @@ public class DetektorGpsScraper : ILocationScraper
 
             if (!_isLoggedIn)
                 throw new InvalidOperationException("No se ha iniciado sesión");
+
+            await HandleChromePasswordWarningIfPresent();
+
+            await HandleChangePasswordPopupIfPresent();
 
             // Crear un DynamicWaitHelper para manejar esperas dinámicas
             var dynamicWait = new DynamicWaitHelper(_driver);
@@ -580,6 +600,10 @@ public class DetektorGpsScraper : ILocationScraper
                 _logger.Debug($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Intento {attempt} de navegar al tracking");
 
                 await CheckPageStatus($"pre-navegación tracking intento {attempt}");
+
+                await HandleChromePasswordWarningIfPresent();
+
+                await HandleChangePasswordPopupIfPresent();
 
                 var popupMonitoringTask = MonitorAndHandlePopup();
 
@@ -1319,7 +1343,8 @@ public class DetektorGpsScraper : ILocationScraper
                             document.querySelector('[class*=""modal""][style*=""display: block""]') ||
                             document.querySelector('[class*=""popup""][style*=""display: block""]') ||
                             document.querySelector('.modal-backdrop') ||
-                            document.querySelector('.overlay:not([style*=""display: none""])')
+                            document.querySelector('.overlay:not([style*=""display: none""])')||
+                            document.querySelector('div:has(h1:contains(""Cambia la contraseña""))')
                         );
                     ");
                     }
@@ -2493,6 +2518,244 @@ public class DetektorGpsScraper : ILocationScraper
         {
             _logger.Error($"Error extrayendo el ángulo del vehículo", ex);
             return 0;
+        }
+    }
+
+    private async Task HandleChangePasswordPopupIfPresent()
+    {
+        try
+        {
+            _logger.Debug("Verificando si existe un popup de cambio de contraseña...");
+
+            // Buscar el popup por su contenido o título
+            var passwordPopup = _driver.FindElements(By.XPath(
+                "//div[contains(text(), 'Cambia la contraseña') or .//h1[contains(text(), 'Cambia la contraseña')]]"
+            )).FirstOrDefault(e => e.Displayed);
+
+            if (passwordPopup != null)
+            {
+                _logger.Info("Popup de cambio de contraseña detectado, intentando cerrar", true);
+
+                // Buscar el botón Aceptar dentro del popup
+                var acceptButton = _driver.FindElements(By.XPath(
+                    "//button[text()='Aceptar' or contains(@class, 'accept') or contains(@class, 'primary')]"
+                )).FirstOrDefault(b => b.Displayed && b.Enabled);
+
+                if (acceptButton != null)
+                {
+                    await ClickElementWithRetry(acceptButton);
+                    _logger.Info("Popup de cambio de contraseña cerrado exitosamente", true);
+                    await Task.Delay(500); // Espera breve para que se complete la animación
+                }
+                else
+                {
+                    // Intentar encontrar el botón con JavaScript si los selectores anteriores fallan
+                    var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    var popups = document.querySelectorAll('div.modal, div[role=""dialog""]');
+                    for (var i = 0; i < popups.length; i++) {
+                        var popup = popups[i];
+                        if (popup.textContent.includes('Cambia la contraseña') && 
+                            popup.style.display !== 'none') {
+                            var buttons = popup.querySelectorAll('button');
+                            for (var j = 0; j < buttons.length; j++) {
+                                var button = buttons[j];
+                                if (button.textContent.includes('Aceptar')) {
+                                    button.click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                ");
+
+                    if (jsResult is bool && (bool)jsResult)
+                    {
+                        _logger.Info("Popup de cambio de contraseña cerrado mediante JavaScript", true);
+                    }
+                    else
+                    {
+                        _logger.Warning("No se pudo encontrar el botón para cerrar el popup de cambio de contraseña");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning($"Error al intentar manejar el popup de cambio de contraseña: {ex.Message}");
+        }
+    }
+
+    private async Task HandleChromePasswordWarningIfPresent()
+    {
+        try
+        {
+            _logger.Debug("Verificando si existe un popup de advertencia de contraseña de Chrome...");
+
+            // Volver al documento principal
+            _driver.SwitchTo().DefaultContent();
+
+            // Verificar si existe un popup de advertencia de contraseña usando JavaScript
+            var popupExists = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            // Función para buscar en shadow DOM y DOM regular
+            function findInShadowAndRegularDOM(rootNode, selector) {
+                // Primero buscar en DOM normal
+                const regularDomElement = document.querySelector(selector);
+                if (regularDomElement) return regularDomElement;
+                
+                // Función recursiva para buscar en shadow DOM
+                function searchInNode(node) {
+                    if (node.shadowRoot) {
+                        // Buscar dentro del shadow root
+                        const found = node.shadowRoot.querySelector(selector);
+                        if (found) return found;
+                        
+                        // Buscar en los hijos del shadow root
+                        const shadowChildren = node.shadowRoot.querySelectorAll('*');
+                        for (const child of shadowChildren) {
+                            const deepFound = searchInNode(child);
+                            if (deepFound) return deepFound;
+                        }
+                    }
+                    
+                    // Buscar en los hijos del nodo regular
+                    const children = node.querySelectorAll('*');
+                    for (const child of children) {
+                        const deepFound = searchInNode(child);
+                        if (deepFound) return deepFound;
+                    }
+                    
+                    return null;
+                }
+                
+                return searchInNode(rootNode);
+            }
+            
+            // Buscar elementos que indiquen un popup de contraseña
+            const passwordChangeTitle = document.querySelector('h1, div.title, .header-title, .modal-title');
+            if (passwordChangeTitle && 
+                (passwordChangeTitle.textContent.includes('Cambia la contraseña') || 
+                 passwordChangeTitle.textContent.includes('Change password'))) {
+                return true;
+            }
+            
+            // Buscar botón de Aceptar en popups posibles
+            const acceptButton = findInShadowAndRegularDOM(
+                document, 
+                'button.primary-button, cr-button[dialog-confirm], button.mat-button-base'
+            );
+            
+            // Si encontramos un botón y contiene texto de aceptar
+            if (acceptButton && 
+                (acceptButton.textContent.includes('Aceptar') || 
+                 acceptButton.textContent.includes('Accept'))) {
+                return true;
+            }
+            
+            // Buscar por contenido general que indique un popup de seguridad
+            const securityText = document.body.innerText;
+            return securityText.includes('Cambia la contraseña') || 
+                   securityText.includes('Gestor de contraseñas') ||
+                   securityText.includes('seguridad de datos');
+        ") as bool? ?? false;
+
+            if (popupExists)
+            {
+                _logger.Info("Popup de cambio de contraseña detectado, intentando cerrar", true);
+
+                // Intentar hacer clic en el botón Aceptar
+                var clickSuccess = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                function findButtonInShadowDOM(rootNode, buttonTexts) {
+                    // Primero buscar en DOM normal
+                    for (const text of buttonTexts) {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        for (const button of buttons) {
+                            if (button.textContent.includes(text) && 
+                                button.style.display !== 'none' && 
+                                button.offsetParent !== null) {
+                                button.click();
+                                return true;
+                            }
+                        }
+                    }
+                    
+                    // Función recursiva para buscar en shadow DOM
+                    function searchInNode(node) {
+                        if (!node) return false;
+                        
+                        if (node.shadowRoot) {
+                            // Buscar botones dentro del shadow root
+                            const shadowButtons = node.shadowRoot.querySelectorAll('button, cr-button');
+                            for (const button of shadowButtons) {
+                                for (const text of buttonTexts) {
+                                    if (button.textContent.includes(text)) {
+                                        button.click();
+                                        return true;
+                                    }
+                                }
+                            }
+                            
+                            // Buscar en los hijos del shadow root
+                            const shadowChildren = node.shadowRoot.querySelectorAll('*');
+                            for (const child of shadowChildren) {
+                                if (searchInNode(child)) return true;
+                            }
+                        }
+                        
+                        // Buscar en los hijos del nodo regular
+                        const children = node.querySelectorAll('*');
+                        for (const child of children) {
+                            if (searchInNode(child)) return true;
+                        }
+                        
+                        return false;
+                    }
+                    
+                    return searchInNode(rootNode);
+                }
+                
+                // Lista de textos posibles para el botón de aceptar
+                const buttonTexts = ['Aceptar', 'Accept', 'OK', 'Continuar', 'Continue'];
+                
+                // Buscar y hacer clic en el botón
+                return findButtonInShadowDOM(document, buttonTexts);
+            ") as bool? ?? false;
+
+                if (clickSuccess)
+                {
+                    _logger.Info("Se cerró exitosamente el popup de cambio de contraseña", true);
+                    await Task.Delay(500); // Esperar a que se complete la animación
+                }
+                else
+                {
+                    // Intentar con el método convencional si el JavaScript avanzado falla
+                    try
+                    {
+                        // Intentar encontrar el botón por diferentes selectores
+                        var acceptButton = _driver.FindElements(By.XPath("//button[contains(text(), 'Aceptar') or contains(text(), 'Accept')]"))
+                            .FirstOrDefault(b => b.Displayed && b.Enabled);
+
+                        if (acceptButton != null)
+                        {
+                            await ClickElementWithRetry(acceptButton);
+                            _logger.Info("Se cerró el popup usando el método convencional", true);
+                            await Task.Delay(500);
+                        }
+                        else
+                        {
+                            _logger.Warning("No se pudo encontrar el botón para cerrar el popup de cambio de contraseña");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warning($"Error al buscar el botón con método convencional: {ex.Message}");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning($"Error al intentar manejar el popup de advertencia de contraseña: {ex.Message}");
         }
     }
 
