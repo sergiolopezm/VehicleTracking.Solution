@@ -1574,12 +1574,26 @@ public class DetektorGpsScraper : ILocationScraper
     {
         _logger.Debug($"Iniciando búsqueda del popup con retry — intentos: {maxAttempts}");
 
-        /* 1. intento directo (normalmente suficiente) */
+        /* 1. intento directo (normalmente suficiente) - SIN cambiar contexto */
         try
         {
-            return await WaitForVehiclePopupAsync(TimeSpan.FromSeconds(6), ct);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var timeout = TimeSpan.FromSeconds(6);
+
+            while (sw.Elapsed < timeout)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                // Buscar popup DENTRO del iframe actual
+                var popup = _driver.FindElements(By.CssSelector("div.olFramedCloudPopupContent"))
+                                   .FirstOrDefault(el => el.Displayed && !string.IsNullOrWhiteSpace(el.Text));
+
+                if (popup != null) return popup;
+
+                await Task.Delay(250, ct);
+            }
         }
-        catch (WebDriverTimeoutException)
+        catch (Exception)
         {
             _logger.Debug("Popup no visible tras la espera principal — aplicando rutina de arrastre");
         }
@@ -1592,7 +1606,7 @@ public class DetektorGpsScraper : ILocationScraper
         var r = icon.getBoundingClientRect();
         return { top:r.top,bottom:r.bottom,left:r.left,right:r.right,
                  viewportWidth:window.innerWidth, viewportHeight:window.innerHeight };")
-                     as Dictionary<string, object>;
+                         as Dictionary<string, object>;
 
         if (iconPosition == null)
         {
@@ -1615,7 +1629,7 @@ public class DetektorGpsScraper : ILocationScraper
         {
             _logger.Debug($"Intento {i + 1} de encontrar el popup mediante arrastre");
 
-            /* comprobar rápido si ya está visible */
+            /* comprobar rápido si ya está visible - DENTRO del iframe */
             var popupNow = _driver.FindElements(By.CssSelector("div.olFramedCloudPopupContent"))
                                   .FirstOrDefault(el => el.Displayed && !string.IsNullOrWhiteSpace(el.Text));
             if (popupNow != null) return popupNow;
@@ -1632,7 +1646,7 @@ public class DetektorGpsScraper : ILocationScraper
             else if (iconRight > vw - 100)
                 await DragMap(mapElement, cx, cy, -drag, 0);     // mover icono ←   mapa →
 
-            /* esperar a que termine la animación */
+            /* esperar a que termine la animación - MANTENER optimización */
             var dw = new DynamicWaitHelper(_driver);
             await dw.WaitForConditionAsync(
                 d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
@@ -1640,7 +1654,7 @@ public class DetektorGpsScraper : ILocationScraper
                 "map_update_after_drag",
                 TimeSpan.FromSeconds(1));
 
-            await Task.Delay(350, ct);
+            await Task.Delay(350, ct);  // Mantener el delay optimizado
         }
 
         _logger.Error("No se pudo encontrar el popup después de todos los intentos");
@@ -1824,101 +1838,7 @@ public class DetektorGpsScraper : ILocationScraper
         }
 
         return null;
-    }
-
-    private async Task<bool> ClickElementWithRetry(IWebElement element, int maxAttempts = 3)
-    {
-        for (int i = 0; i < maxAttempts; i++)
-        {
-            try
-            {
-                if (!element.Displayed)
-                {
-                    _logger.Warning($"Elemento no visible en intento {i + 1}");
-                    continue;
-                }
-
-                // Intentar hacer scroll al elemento
-                try
-                {
-                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block:'center'});", element);
-                }
-                catch (Exception ex)
-                {
-                    _logger.Warning($"Error al hacer scroll al elemento: {ex.Message}");
-                }
-
-                // Verificar que no haya overlay por encima
-                bool covered = _driver.FindElements(
-                    By.CssSelector(".ui-table-loading, .loading, .wait, .spinner"))
-                    .Any(o => o.Displayed &&
-                              o.GetAttribute("style") != "display: none;");
-
-                if (covered)
-                {
-                    _logger.Warning($"Overlay detectado en intento {i + 1}, esperando...");
-                    continue;
-                }
-
-                // Primero intentar un clic normal
-                try
-                {
-                    _logger.Debug("Intentando clic normal...");
-                    element.Click();
-                    return true;
-                }
-                catch (Exception clickEx)
-                {
-                    _logger.Warning($"Clic normal falló: {clickEx.Message}, intentando alternativas...");
-
-                    // Intentar clic mediante JavaScript
-                    try
-                    {
-                        _logger.Debug("Intentando clic con JavaScript...");
-                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", element);
-                        return true;
-                    }
-                    catch (Exception jsEx)
-                    {
-                        _logger.Warning($"Clic con JavaScript falló: {jsEx.Message}");
-
-                        // Si es el último intento, intentar con Actions
-                        if (i == maxAttempts - 1)
-                        {
-                            try
-                            {
-                                _logger.Debug("Intentando clic con Actions...");
-                                var actions = new Actions(_driver);
-                                actions.MoveToElement(element).Click().Perform();
-                                return true;
-                            }
-                            catch (Exception actionEx)
-                            {
-                                _logger.Error($"Clic con Actions falló", actionEx);
-                                throw;
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning($"Error en intento {i + 1} de click: {ex.Message}");
-                if (i == maxAttempts - 1) throw;
-            }
-
-            // Espera breve entre intentos - sin usar Task.Delay fijo
-            var dynamicWait = new DynamicWaitHelper(_driver);
-            await dynamicWait.WaitForConditionAsync(
-                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
-                    .Any(e => e.Displayed),
-                "no_overlay",
-                TimeSpan.FromMilliseconds(300)
-            );
-        }
-
-        return false;
-    }
+    }    
 
     private async Task<IWebElement?> FindVehicleIcon()
     {
@@ -3004,25 +2924,24 @@ var currentZoom = map.getZoom();
     {
         timeout ??= TimeSpan.FromSeconds(12);
 
-        // El popup se dibuja fuera del <iframe>; garantizamos el contexto adecuado
-        _driver.SwitchTo().DefaultContent();
+        // NO CAMBIAR CONTEXTO - El popup está DENTRO del iframe
+        // _driver.SwitchTo().DefaultContent();  ← COMENTAR ESTA LÍNEA
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < timeout)
         {
             ct.ThrowIfCancellationRequested();
 
-            // FindElements → lista vacía = sin excepción (patrón recomendado) :contentReference[oaicite:3]{index=3}
             var popup = _driver.FindElements(By.CssSelector("div.olFramedCloudPopupContent"))
                                .FirstOrDefault(el => el.Displayed &&
                                                      !string.IsNullOrWhiteSpace(el.Text));
 
             if (popup != null) return popup;
 
-            await Task.Delay(250, ct);          // fluent-wait manual de 250 ms :contentReference[oaicite:4]{index=4}
+            await Task.Delay(250, ct);
         }
 
-        return null;                            // devolvemos null en vez de lanzar
+        return null;
     }
 
     public void Dispose()
