@@ -67,7 +67,7 @@ public class DetektorGpsScraper : ILocationScraper
 
             // AÑADIR ESTAS LÍNEAS PARA MAXIMIZAR LA VENTANA Y CONFIGURAR TIMEOUTS
             _driver.Manage().Window.Maximize();
-            _driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(10);
+            _driver.Manage().Timeouts().ImplicitWait = TimeSpan.Zero;
 
             _wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_config.TimeoutSeconds));
             _isLoggedIn = false;
@@ -133,7 +133,7 @@ public class DetektorGpsScraper : ILocationScraper
             }
 
             _logger.Debug("Buscando botón de login...");
-            var (loginButton, buttonError ) = await dynamicWait.WaitForElementAsync(
+            var (loginButton, buttonError) = await dynamicWait.WaitForElementAsync(
                 By.Id("initSession"),
                 "login_button",
                 ensureClickable: true);
@@ -157,22 +157,12 @@ public class DetektorGpsScraper : ILocationScraper
             await CheckPageStatus("pre-login");
 
             _logger.Debug("Intentando hacer clic en el botón de login...");
-            try
-            {
-                loginButton.Click();
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning("Click normal falló, intentando con JavaScript...");
-                IJavaScriptExecutor js = (IJavaScriptExecutor)_driver;
-                js.ExecuteScript("arguments[0].click();", loginButton);
-            }
+            await ClickWhenClickableAsync(By.Id("initSession"));
 
             // Manejar posible popup de contraseña
             await HandleChromePasswordWarningIfPresent();
 
             // Verificar si hay errores de login visibles
-            await Task.Delay(1000);
             try
             {
                 var errorElements = _driver.FindElements(By.CssSelector(".alert-danger, .error-message, #errorMsg, .login-error"));
@@ -204,10 +194,15 @@ public class DetektorGpsScraper : ILocationScraper
             }
 
             _logger.Debug("Botón Skytrack encontrado, intentando hacer clic...");
-            await ClickElementWithRetry(skytrackButton);
+            await ClickWhenClickableAsync(By.Id("idBtnProductSkytrack"), cachedElement: skytrackButton);
 
             _logger.Debug("Esperando apertura de nueva pestaña...");
-            await Task.Delay(500);  // Breve espera para estabilización
+            await dynamicWait.WaitForConditionAsync(
+                d => d.WindowHandles.Count > 1,
+                "new_tab_opened",
+                TimeSpan.FromSeconds(3)
+            );
+
             var windows = _driver.WindowHandles;
             _driver.SwitchTo().Window(windows.Last());
 
@@ -287,7 +282,12 @@ public class DetektorGpsScraper : ILocationScraper
                     if (attempt < maxAttempts - 1)
                     {
                         _logger.Warning($"Intento {attempt + 1} fallido, reintentando verificación...");
-                        await Task.Delay(1000);  // Espera entre intentos
+                        await dynamicWait.WaitForConditionAsync(
+                            d => d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .All(e => !e.Displayed),
+                            "wait_for_spinners",
+                            TimeSpan.FromSeconds(1)
+                        );
                     }
                 }
                 catch (InvalidOperationException ex) when (ex.Message.StartsWith("SERVIDOR_CAIDO:"))
@@ -381,25 +381,7 @@ public class DetektorGpsScraper : ILocationScraper
                     try
                     {
                         // Verificar que no hay overlay de carga
-                        var noLoading = await dynamicWait.WaitForConditionAsync(
-                            d => {
-                                try
-                                {
-                                    return !(bool)((IJavaScriptExecutor)d).ExecuteScript(
-                                        "return !!document.querySelector('.ui-table-loading')?.offsetParent"
-                                    );
-                                }
-                                catch { return false; }
-                            },
-                            "loading_check",
-                            TimeSpan.FromSeconds(2)
-                        );
-
-                        if (!noLoading)
-                        {
-                            _logger.Warning($"Intento {clickAttempt + 1}: Overlay de carga aún presente");
-                            continue;
-                        }
+                        await WaitForNoOverlayAsync();
 
                         // Refrescar el elemento antes de cada intento
                         var buttons = _driver.FindElements(By.CssSelector("button.ui-button-danger[icon='pi pi-compass']"))
@@ -410,20 +392,17 @@ public class DetektorGpsScraper : ILocationScraper
                         if (button == null)
                         {
                             _logger.Warning($"Intento {clickAttempt + 1}: Botón no encontrado, reintentando...");
-                            await Task.Delay(500);
+                            await dynamicWait.WaitForConditionAsync(
+                                d => d.FindElements(By.CssSelector("button.ui-button-danger[icon='pi pi-compass']"))
+                                    .Any(b => b.Displayed && b.Enabled),
+                                "compass_button",
+                                TimeSpan.FromMilliseconds(500)
+                            );
                             continue;
                         }
 
-                        // Asegurar que el botón está visible
-                        ((IJavaScriptExecutor)_driver).ExecuteScript(
-                            "arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});",
-                            button
-                        );
-
-                        await Task.Delay(200); // Breve espera para que el scroll termine
-
                         // Intentar el clic
-                        await ClickElementWithRetry(button);
+                        await ClickWhenClickableAsync(By.CssSelector("button.ui-button-danger[icon='pi pi-compass']"), cachedElement: button);
                         clickSuccess = true;
 
                         _logger.Debug($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds}ms] Esperando carga del mapa");
@@ -449,7 +428,12 @@ public class DetektorGpsScraper : ILocationScraper
                     {
                         _logger.Warning($"Error en intento {clickAttempt + 1} de clic: {ex.Message}");
                         if (clickAttempt == 2) throw;
-                        await Task.Delay(500);
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .Any(e => e.Displayed),
+                            "wait_for_retry",
+                            TimeSpan.FromMilliseconds(300)
+                        );
                     }
                 }
 
@@ -547,15 +531,33 @@ public class DetektorGpsScraper : ILocationScraper
 
             // Hacer clic en el icono del vehículo
             var angle = await ExtractVehicleAngle(vehicleIcon);
-            await ClickElementWithRetry(vehicleIcon);
 
-            // Verificar estado antes de buscar el popup
-            await CheckPageStatus("pre-búsqueda de popup");
+            // ①   clic usando el elemento ya localizado, con un pequeño timeout extra
+            await ClickWhenClickableAsync(
+                    By.XPath("//*[name()='svg']//*[name()='image'][@width='35'][@height='35']"),
+                    cachedElement: vehicleIcon,                      // reutilizamos el WebElement
+                    timeout: TimeSpan.FromSeconds(4)                 // 1 s más holgado
+            );
 
-            _logger.Debug($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds}ms] Buscando popup de información");
+            // ②   ahora SÍ esperamos a que aparezca el popup (flu-wait 250 ms)
+            _logger.Debug($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds}ms] Esperando popup de información");
 
-            // Intentar encontrar el popup de información
-            var infoWindow = await FindPopupWithRetry();
+            IWebElement infoWindow;
+            try
+            {
+                infoWindow = await WaitForVehiclePopupAsync(TimeSpan.FromSeconds(12));
+
+                if (infoWindow == null)                 // si sigue sin verse, usamos el rescate
+                {
+                    _logger.Debug("Popup no visible tras espera primaria — iniciando rescate");
+                    infoWindow = await FindPopupWithRetry();    // rutina de arrastre/zoom
+                }
+            }
+            catch (WebDriverTimeoutException)       // si el popup quedó fuera de vista
+            {
+                _logger.Debug("Popup no visible tras la espera principal — procediendo con rescate");
+                infoWindow = await FindPopupWithRetry();            // tu rescate existente
+            }
             if (infoWindow == null)
             {
                 throw new InvalidOperationException("No se pudo obtener la información del vehículo después de múltiples intentos");
@@ -657,10 +659,16 @@ public class DetektorGpsScraper : ILocationScraper
                         if (menuPrincipal == null)
                         {
                             _logger.Warning($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] No se encontró el menú principal, reintentando...");
+                            await dynamicWait.WaitForConditionAsync(
+                                d => d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                    .All(e => !e.Displayed),
+                                "wait_for_retry",
+                                TimeSpan.FromMilliseconds(300)
+                            );
                             continue;
                         }
 
-                        await ClickElementWithRetry(menuPrincipal);
+                        await ClickWhenClickableAsync(By.CssSelector("td.myMenu"), cachedElement: menuPrincipal);
 
                         // Verificación agresiva del despliegue del menú
                         for (int verificationAttempt = 0; verificationAttempt < 6; verificationAttempt++)
@@ -690,11 +698,15 @@ public class DetektorGpsScraper : ILocationScraper
 
                             try
                             {
-                                await ClickElementWithRetry(menuPrincipal);
+                                await ClickWhenClickableAsync(By.CssSelector("td.myMenu"), timeout: TimeSpan.FromMilliseconds(500));
                             }
                             catch { }
 
-                            await Task.Delay(100);
+                            await dynamicWait.WaitForConditionAsync(
+                                d => true, // Solo para esperar un breve momento
+                                "menu_click_retry",
+                                TimeSpan.FromMilliseconds(100)
+                            );
                         }
 
                         if (!menuExpanded && menuAttempts == maxMenuAttempts)
@@ -706,7 +718,12 @@ public class DetektorGpsScraper : ILocationScraper
                     {
                         _logger.Warning($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Error en intento {menuAttempts} de expandir menú: {ex.Message}");
                         if (menuAttempts == maxMenuAttempts) throw;
-                        await Task.Delay(200);
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .Any(e => e.Displayed),
+                            "wait_for_retry",
+                            TimeSpan.FromMilliseconds(200)
+                        );
                     }
                 }
 
@@ -727,8 +744,12 @@ public class DetektorGpsScraper : ILocationScraper
                             var menuPrincipal = await WaitForElementWithRetry(By.CssSelector("td.myMenu"), timeout: 2);
                             if (menuPrincipal != null)
                             {
-                                await ClickElementWithRetry(menuPrincipal);
-                                await Task.Delay(200);
+                                await ClickWhenClickableAsync(By.CssSelector("td.myMenu"), timeout: TimeSpan.FromMilliseconds(500));
+                                await dynamicWait.WaitForConditionAsync(
+                                    d => true,
+                                    "menu_click_retry",
+                                    TimeSpan.FromMilliseconds(200)
+                                );
                                 continue;
                             }
 
@@ -736,7 +757,10 @@ public class DetektorGpsScraper : ILocationScraper
                         }
 
                         await CheckPageStatus($"pre-clic informes intento {informesAttempts}");
-                        await ClickElementWithRetry(informesButton);
+                        var informesBtn = await FindInformesButton();
+                        await ClickWhenClickableAsync(
+                              By.XPath("//a[contains(text(),'Informes')]"),
+                              cachedElement: informesBtn);
 
                         var informesLoaded = await dynamicWait.WaitForConditionAsync(
                             condition: d =>
@@ -765,7 +789,12 @@ public class DetektorGpsScraper : ILocationScraper
                     {
                         _logger.Warning($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Error en intento {informesAttempts} de clic en Informes: {ex.Message}");
                         if (informesAttempts == maxInformesAttempts) throw;
-                        await Task.Delay(200);
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .Any(e => e.Displayed),
+                            "wait_for_retry",
+                            TimeSpan.FromMilliseconds(200)
+                        );
                     }
                 }
 
@@ -792,8 +821,14 @@ public class DetektorGpsScraper : ILocationScraper
                         string originalWindow = _driver.CurrentWindowHandle;
 
                         // Hacer clic y esperar a que el iframe esté disponible
-                        await ClickElementWithRetry(ultimoPuntoBetaButton);
-                        await Task.Delay(1000);
+                        await ClickWhenClickableAsync(By.XPath("//a[contains(text(),'Ultimo Punto (Beta)')]"), cachedElement: ultimoPuntoBetaButton);
+
+                        // Esperar a que se abra una nueva pestaña
+                        await dynamicWait.WaitForConditionAsync(
+                            d => d.WindowHandles.Count > currentWindows,
+                            "new_window_opened",
+                            TimeSpan.FromSeconds(3)
+                        );
 
                         // Verificar si se abrió una nueva pestaña
                         var newWindows = _driver.WindowHandles;
@@ -810,8 +845,14 @@ public class DetektorGpsScraper : ILocationScraper
                                 if (currentUrl == originalWindow)
                                 {
                                     // Reintentar el clic
-                                    await ClickElementWithRetry(ultimoPuntoBetaButton);
-                                    await Task.Delay(1000);
+                                    await ClickWhenClickableAsync(By.XPath("//a[contains(text(), 'Ultimo Punto (Beta)')]"), cachedElement: ultimoPuntoBetaButton);
+
+                                    // Esperar a que se abra una nueva pestaña
+                                    await dynamicWait.WaitForConditionAsync(
+                                        d => d.WindowHandles.Count > currentWindows,
+                                        "new_window_opened_retry",
+                                        TimeSpan.FromSeconds(3)
+                                    );
 
                                     newWindows = _driver.WindowHandles;
                                     if (newWindows.Count > currentWindows)
@@ -884,8 +925,15 @@ public class DetektorGpsScraper : ILocationScraper
                     else
                     {
                         _logger.Debug($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Opción 'Ultimo Punto' encontrada, procediendo con flujo normal");
-                        await ClickElementWithRetry(ultimoPuntoBetaButton);
-                        await Task.Delay(1000);
+                        await ClickWhenClickableAsync(By.XPath("//a[contains(text(),'Ultimo Punto')]"), cachedElement: ultimoPuntoBetaButton );
+
+                        // Esperar a que la acción se complete
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .Any(e => e.Displayed),
+                            "wait_after_click",
+                            TimeSpan.FromMilliseconds(1000)
+                        );
 
                         // Cambiar al iframe y buscar el vehículo en la tabla
                         var tableResult = await SwitchToTableIframeAndClickVehicle(dynamicWait);
@@ -910,14 +958,26 @@ public class DetektorGpsScraper : ILocationScraper
                 _logger.Warning($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Timeout en intento {attempt}: {ex.Message}");
                 if (attempt == maxAttempts)
                     throw new InvalidOperationException("Timeout al intentar navegar al tracking", ex);
-                await Task.Delay(1000);
+
+                await dynamicWait.WaitForConditionAsync(
+                    d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                        .Any(e => e.Displayed),
+                    "wait_after_timeout",
+                    TimeSpan.FromMilliseconds(1000)
+                );
             }
             catch (Exception ex)
             {
                 _logger.Error($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Error en intento {attempt}", ex);
                 if (attempt == maxAttempts)
                     throw new InvalidOperationException("Error durante la navegación", ex);
-                await Task.Delay(1000);
+
+                await dynamicWait.WaitForConditionAsync(
+                    d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                        .Any(e => e.Displayed),
+                    "wait_after_error",
+                    TimeSpan.FromMilliseconds(1000)
+                );
             }
         }
 
@@ -996,7 +1056,6 @@ public class DetektorGpsScraper : ILocationScraper
 
             // Buscar la celda con la placa de manera dinámica
             var maxSearchAttempts = 3;
-            var searchDelay = 500; // Retraso inicial entre intentos
 
             for (int searchAttempt = 0; searchAttempt < maxSearchAttempts; searchAttempt++)
             {
@@ -1033,6 +1092,13 @@ public class DetektorGpsScraper : ILocationScraper
                                 // Intentar hacer scroll a la celda
                                 ((IJavaScriptExecutor)d).ExecuteScript("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", targetCell);
 
+                                // Verificar que no hay overlay
+                                bool hasOverlay = d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                    .Any(e => e.Displayed);
+
+                                if (hasOverlay)
+                                    return false;
+
                                 // Intentar el clic
                                 targetCell.Click();
                                 return true;
@@ -1057,9 +1123,13 @@ public class DetektorGpsScraper : ILocationScraper
 
                     if (searchAttempt < maxSearchAttempts - 1)
                     {
-                        _logger.Warning($"[Tiempo: {stopwatch.ElapsedMilliseconds}ms] Intento {searchAttempt + 1} fallido, reintentando después de {searchDelay}ms");
-                        await Task.Delay(searchDelay);
-                        searchDelay = Math.Min(searchDelay * 2, 2000); // Incremento exponencial con límite
+                        _logger.Warning($"[Tiempo: {stopwatch.ElapsedMilliseconds}ms] Intento {searchAttempt + 1} fallido, reintentando");
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                .Any(e => e.Displayed),
+                            "wait_between_search",
+                            TimeSpan.FromMilliseconds(300 * (searchAttempt + 1))
+                        );
                     }
                 }
                 catch (Exception ex)
@@ -1090,7 +1160,6 @@ public class DetektorGpsScraper : ILocationScraper
     private async Task<(IWebElement Button, string Location)?> FindVehicleInTableWithPolling(string patent, DynamicWaitHelper dynamicWait, int maxAttempts = 3)
     {
         var startTime = DateTime.UtcNow;
-        var pollingInterval = 100; // Aumentado a 100ms para ser menos agresivo
         var maxWaitTime = TimeSpan.FromSeconds(10); // Aumentado a 10 segundos
         var globalStopwatch = new Stopwatch();
         var actionStopwatch = new Stopwatch();
@@ -1146,7 +1215,14 @@ public class DetektorGpsScraper : ILocationScraper
                             _logger.Debug("Tabla tiene filas pero vehículo no encontrado, intentando refrescar una vez...");
                             await RefreshTableIfPossible();
                             hasTriedRefresh = true;
-                            await Task.Delay(2000); // Espera después del refresco
+
+                            // Esperar después del refresco
+                            await dynamicWait.WaitForConditionAsync(
+                                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait,.ui-table-loading"))
+                                    .Any(e => e.Displayed),
+                                "wait_after_refresh",
+                                TimeSpan.FromSeconds(2)
+                            );
                         }
                     }
                 }
@@ -1157,15 +1233,30 @@ public class DetektorGpsScraper : ILocationScraper
                     _logger.Debug("Acercándose al timeout, intentando refrescar tabla...");
                     await RefreshTableIfPossible();
                     hasTriedRefresh = true;
-                    await Task.Delay(2000);
+
+                    // Esperar después del refresco
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait,.ui-table-loading"))
+                            .Any(e => e.Displayed),
+                        "wait_after_timeout_refresh",
+                        TimeSpan.FromSeconds(2)
+                    );
                 }
 
-                await Task.Delay(pollingInterval);
+                await dynamicWait.WaitForConditionAsync(
+                    d => true, // Solo para esperar un breve momento
+                    "poll_interval",
+                    TimeSpan.FromMilliseconds(100)
+                );
             }
             catch (Exception ex)
             {
                 _logger.Warning($"[Tiempo: {globalStopwatch.ElapsedMilliseconds}ms] Error durante polling: {ex.Message}");
-                await Task.Delay(pollingInterval);
+                await dynamicWait.WaitForConditionAsync(
+                    d => true,
+                    "error_interval",
+                    TimeSpan.FromMilliseconds(100)
+                );
             }
         }
 
@@ -1219,7 +1310,7 @@ public class DetektorGpsScraper : ILocationScraper
             var refreshButton = _driver.FindElement(By.CssSelector("button.ui-button-danger"));
             if (refreshButton != null && refreshButton.Displayed && refreshButton.Enabled)
             {
-                await ClickElementWithRetry(refreshButton);
+                await ClickWhenClickableAsync(By.CssSelector("button.ui-button-danger"), cachedElement: refreshButton);
                 _logger.Debug("Tabla refrescada exitosamente");
             }
         }
@@ -1327,7 +1418,7 @@ public class DetektorGpsScraper : ILocationScraper
     {
         var startTime = DateTime.UtcNow;
         var maxWaitTime = TimeSpan.FromSeconds(10);
-        var checkInterval = TimeSpan.FromMilliseconds(50); // Polling frecuente
+        var dynamicWait = new DynamicWaitHelper(_driver);
 
         while (DateTime.UtcNow - startTime < maxWaitTime)
         {
@@ -1361,7 +1452,11 @@ public class DetektorGpsScraper : ILocationScraper
                     {
                         _logger.Debug("Popup detectado y cerrado exitosamente");
                         // Esperar un momento para asegurar que cualquier animación termine
-                        await Task.Delay(100);
+                        await dynamicWait.WaitForConditionAsync(
+                            d => true,
+                            "popup_close_delay",
+                            TimeSpan.FromMilliseconds(100)
+                        );
 
                         // Verificar que realmente se cerró
                         if (await VerifyPopupClosed())
@@ -1371,12 +1466,20 @@ public class DetektorGpsScraper : ILocationScraper
                     }
                 }
 
-                await Task.Delay(checkInterval);
+                await dynamicWait.WaitForConditionAsync(
+                    d => true,
+                    "popup_check_interval",
+                    TimeSpan.FromMilliseconds(50)
+                );
             }
             catch (Exception ex)
             {
                 _logger.Warning($"Error en monitoreo de popup: {ex.Message}");
-                await Task.Delay(checkInterval);
+                await dynamicWait.WaitForConditionAsync(
+                    d => true,
+                    "error_recovery",
+                    TimeSpan.FromMilliseconds(50)
+                );
             }
         }
     }
@@ -1447,7 +1550,15 @@ public class DetektorGpsScraper : ILocationScraper
             ", element, startX, startY, offsetX, offsetY);
             }
 
-            await Task.Delay(1000); // Esperar a que el mapa se actualice
+            // Esperar a que el mapa se actualice
+            var dynamicWait = new DynamicWaitHelper(_driver);
+            await dynamicWait.WaitForConditionAsync(
+                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                    .Any(e => e.Displayed),
+                "map_update_after_drag",
+                TimeSpan.FromSeconds(1)
+            );
+
             _logger.Debug("Arrastre del mapa completado");
         }
         catch (Exception ex)
@@ -1457,132 +1568,83 @@ public class DetektorGpsScraper : ILocationScraper
         }
     }
 
-    private async Task<IWebElement?> FindPopupWithRetry(int maxAttempts = 3)
+    private async Task<IWebElement?> FindPopupWithRetry(
+    int maxAttempts = 3,
+    CancellationToken ct = default)
     {
+        _logger.Debug($"Iniciando búsqueda del popup con retry — intentos: {maxAttempts}");
+
+        /* 1. intento directo (normalmente suficiente) */
         try
         {
-            _logger.Debug($"Iniciando búsqueda del popup con retry - intentos máximos: {maxAttempts}");
+            return await WaitForVehiclePopupAsync(TimeSpan.FromSeconds(6), ct);
+        }
+        catch (WebDriverTimeoutException)
+        {
+            _logger.Debug("Popup no visible tras la espera principal — aplicando rutina de arrastre");
+        }
 
-            // Obtener la posición del icono del vehículo
-            var iconPosition = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-            try {
-                var icons = document.evaluate(""//*[name()='svg']//*[name()='image'][@width='35'][@height='35']"", 
-                                           document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                var rect = icons.getBoundingClientRect();
-                return {
-                    top: rect.top,
-                    bottom: rect.bottom,
-                    left: rect.left,
-                    right: rect.right,
-                    viewportWidth: window.innerWidth,
-                    viewportHeight: window.innerHeight
-                };
-            } catch(e) {
-                console.error('Error:', e);
-                return null;
-            }
-        ") as Dictionary<string, object>;
+        /* 2. tu lógica original de arrastre para traer el popup al viewport */
+        var iconPosition = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+        var icon = document.evaluate(""//*[name()='svg']//*[name()='image'][@width='35'][@height='35']"",
+                                     document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        if (!icon) return null;
+        var r = icon.getBoundingClientRect();
+        return { top:r.top,bottom:r.bottom,left:r.left,right:r.right,
+                 viewportWidth:window.innerWidth, viewportHeight:window.innerHeight };")
+                     as Dictionary<string, object>;
 
-            if (iconPosition == null)
-            {
-                _logger.Warning("No se pudo obtener la posición del ícono", true);
-                return null;
-            }
-
-            double iconTop = Convert.ToDouble(iconPosition["top"]);
-            double iconBottom = Convert.ToDouble(iconPosition["bottom"]);
-            double iconLeft = Convert.ToDouble(iconPosition["left"]);
-            double iconRight = Convert.ToDouble(iconPosition["right"]);
-            double viewportWidth = Convert.ToDouble(iconPosition["viewportWidth"]);
-            double viewportHeight = Convert.ToDouble(iconPosition["viewportHeight"]);
-
-            _logger.Debug($"Posición del ícono:\n" +
-                $"Top: {iconTop}px\n" +
-                $"Bottom: {iconBottom}px\n" +
-                $"Left: {iconLeft}px\n" +
-                $"Right: {iconRight}px\n" +
-                $"Viewport: {viewportWidth}x{viewportHeight}");
-
-            var mapElement = _driver.FindElement(By.CssSelector("div.olMap"));
-            int centerX = (int)viewportWidth / 2;
-            int centerY = (int)viewportHeight / 2;
-
-            for (int attempt = 0; attempt < maxAttempts; attempt++)
-            {
-                try
-                {
-                    _logger.Debug($"Intento {attempt + 1} de encontrar el popup");
-
-                    // Intentar encontrar el popup (aunque no sea visible)
-                    var popup = _driver.FindElement(By.CssSelector("div.olFramedCloudPopupContent"));
-
-                    if (!popup.Displayed)
-                    {
-                        _logger.Debug("Popup encontrado pero no visible, iniciando arrastre del mapa");
-
-                        // La distancia base de arrastre es menor y aumenta gradualmente
-                        int dragDistance = 100 * (attempt + 1);
-
-                        // IMPORTANTE: El arrastre del mapa debe ser en dirección OPUESTA 
-                        // a donde queremos que se mueva el ícono
-                        if (iconTop < 100)
-                        {
-                            _logger.Debug($"Ícono muy cerca del borde superior ({iconTop}px), " +
-                                                $"arrastrando mapa hacia ARRIBA para que el ícono baje");
-                            await DragMap(mapElement, centerX, centerY, 0, dragDistance);
-                        }
-                        else if (iconBottom > viewportHeight - 100)
-                        {
-                            _logger.Debug($"Ícono muy cerca del borde inferior ({viewportHeight - iconBottom}px), " +
-                                                $"arrastrando mapa hacia ABAJO para que el ícono suba");
-                            await DragMap(mapElement, centerX, centerY, 0, -dragDistance);
-                        }
-                        else if (iconLeft < 100)
-                        {
-                            _logger.Debug($"Ícono muy cerca del borde izquierdo ({iconLeft}px), " +
-                                                $"arrastrando mapa hacia la IZQUIERDA para que el ícono se mueva a la derecha");
-                            await DragMap(mapElement, centerX, centerY, dragDistance, 0);
-                        }
-                        else if (iconRight > viewportWidth - 100)
-                        {
-                            _logger.Debug($"Ícono muy cerca del borde derecho ({viewportWidth - iconRight}px), " +
-                                                $"arrastrando mapa hacia la DERECHA para que el ícono se mueva a la izquierda");
-                            await DragMap(mapElement, centerX, centerY, -dragDistance, 0);
-                        }
-
-                        await Task.Delay(1000);
-
-                        // Verificar si el popup ahora es visible
-                        popup = _driver.FindElement(By.CssSelector("div.olFramedCloudPopupContent"));
-                        if (popup.Displayed && !string.IsNullOrWhiteSpace(popup.Text))
-                        {
-                            _logger.Info("Popup ahora visible después del arrastre", true); ;
-                            return popup;
-                        }
-                    }
-                    else if (!string.IsNullOrWhiteSpace(popup.Text))
-                    {
-                        _logger.Info("Popup encontrado y visible con contenido", true);
-                        return popup;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error($"Error en intento {attempt + 1}", ex);
-                    if (attempt == maxAttempts - 1) throw;
-                }
-
-                await Task.Delay(1000);
-            }
-
-            _logger.Error("No se pudo encontrar el popup después de todos los intentos");
+        if (iconPosition == null)
+        {
+            _logger.Warning("No se pudo obtener la posición del ícono", true);
             return null;
         }
-        catch (Exception ex)
+
+        double iconTop = Convert.ToDouble(iconPosition["top"]);
+        double iconBottom = Convert.ToDouble(iconPosition["bottom"]);
+        double iconLeft = Convert.ToDouble(iconPosition["left"]);
+        double iconRight = Convert.ToDouble(iconPosition["right"]);
+        double vw = Convert.ToDouble(iconPosition["viewportWidth"]);
+        double vh = Convert.ToDouble(iconPosition["viewportHeight"]);
+
+        var mapElement = _driver.FindElement(By.CssSelector("div.olMap"));
+        int cx = (int)vw / 2;
+        int cy = (int)vh / 2;
+
+        for (int i = 0; i < maxAttempts; i++)
         {
-            _logger.Error("Error general en FindPopupWithRetry", ex);
-            throw;
+            _logger.Debug($"Intento {i + 1} de encontrar el popup mediante arrastre");
+
+            /* comprobar rápido si ya está visible */
+            var popupNow = _driver.FindElements(By.CssSelector("div.olFramedCloudPopupContent"))
+                                  .FirstOrDefault(el => el.Displayed && !string.IsNullOrWhiteSpace(el.Text));
+            if (popupNow != null) return popupNow;
+
+            /* distancia incremental */
+            int drag = 100 * (i + 1);
+
+            if (iconTop < 100)
+                await DragMap(mapElement, cx, cy, 0, drag);     // mover icono ↓   mapa ↑
+            else if (iconBottom > vh - 100)
+                await DragMap(mapElement, cx, cy, 0, -drag);     // mover icono ↑   mapa ↓
+            else if (iconLeft < 100)
+                await DragMap(mapElement, cx, cy, drag, 0);     // mover icono →   mapa ←
+            else if (iconRight > vw - 100)
+                await DragMap(mapElement, cx, cy, -drag, 0);     // mover icono ←   mapa →
+
+            /* esperar a que termine la animación */
+            var dw = new DynamicWaitHelper(_driver);
+            await dw.WaitForConditionAsync(
+                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                      .Any(e => e.Displayed),
+                "map_update_after_drag",
+                TimeSpan.FromSeconds(1));
+
+            await Task.Delay(350, ct);
         }
+
+        _logger.Error("No se pudo encontrar el popup después de todos los intentos");
+        return null;
     }
 
     private async Task<LocationDataInfo> ExtractVehicleInformation(IWebElement infoWindow, decimal angle)
@@ -1695,16 +1757,16 @@ public class DetektorGpsScraper : ILocationScraper
         // Lista actualizada de selectores a intentar
         var selectors = new[]
         {
-        (By.Id("idBtnProductSkytrack")),
-        (By.Id("idBtnProductSkytrack-btnInnerEl")),
-        (By.XPath("//a[contains(@id,'idBtnProductSkytrack')]")),
-        (By.XPath("//a[contains(@class,'hexa_btk_si')]")),
-        (By.XPath("//span[contains(text(),'ACCEDER')]")),
-        (By.XPath("//a[contains(@class,'x-btn')]//span[contains(text(),'ACCEDER')]")),
-        (By.XPath("//a[contains(@class,'x-btn')]//span[contains(text(),'Skytrack')]")),
-        // Selector más general como última opción
-        (By.XPath("//*[contains(text(),'ACCEDER') or contains(text(),'Skytrack')]"))
-    };
+            (By.Id("idBtnProductSkytrack")),
+            (By.Id("idBtnProductSkytrack-btnInnerEl")),
+            (By.XPath("//a[contains(@id,'idBtnProductSkytrack')]")),
+            (By.XPath("//a[contains(@class,'hexa_btk_si')]")),
+            (By.XPath("//span[contains(text(),'ACCEDER')]")),
+            (By.XPath("//a[contains(@class,'x-btn')]//span[contains(text(),'ACCEDER')]")),
+            (By.XPath("//a[contains(@class,'x-btn')]//span[contains(text(),'Skytrack')]")),
+            // Selector más general como última opción
+            (By.XPath("//*[contains(text(),'ACCEDER') or contains(text(),'Skytrack')]"))
+        };
 
         for (int attempt = 0; attempt < 3; attempt++)
         {
@@ -1770,7 +1832,6 @@ public class DetektorGpsScraper : ILocationScraper
         {
             try
             {
-                await Task.Delay(500);
                 if (!element.Displayed)
                 {
                     _logger.Warning($"Elemento no visible en intento {i + 1}");
@@ -1780,12 +1841,23 @@ public class DetektorGpsScraper : ILocationScraper
                 // Intentar hacer scroll al elemento
                 try
                 {
-                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView(true);", element);
-                    await Task.Delay(500);
+                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block:'center'});", element);
                 }
                 catch (Exception ex)
                 {
                     _logger.Warning($"Error al hacer scroll al elemento: {ex.Message}");
+                }
+
+                // Verificar que no haya overlay por encima
+                bool covered = _driver.FindElements(
+                    By.CssSelector(".ui-table-loading, .loading, .wait, .spinner"))
+                    .Any(o => o.Displayed &&
+                              o.GetAttribute("style") != "display: none;");
+
+                if (covered)
+                {
+                    _logger.Warning($"Overlay detectado en intento {i + 1}, esperando...");
+                    continue;
                 }
 
                 // Primero intentar un clic normal
@@ -1799,71 +1871,31 @@ public class DetektorGpsScraper : ILocationScraper
                 {
                     _logger.Warning($"Clic normal falló: {clickEx.Message}, intentando alternativas...");
 
-                    // Intentar clic mediante JavaScript con diferentes enfoques
+                    // Intentar clic mediante JavaScript
                     try
                     {
-                        _logger.Debug("Intentando clic con JavaScript (dispatchEvent)...");
-                        ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                        var evt = new MouseEvent('click', {
-                            bubbles: true,
-                            cancelable: true,
-                            view: window
-                        });
-                        arguments[0].dispatchEvent(evt);
-                    ", element);
-                        await Task.Delay(500);
+                        _logger.Debug("Intentando clic con JavaScript...");
+                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", element);
                         return true;
                     }
-                    catch (Exception jsEx1)
+                    catch (Exception jsEx)
                     {
-                        _logger.Warning($"Primer método JavaScript falló: {jsEx1.Message}, intentando siguiente método...");
+                        _logger.Warning($"Clic con JavaScript falló: {jsEx.Message}");
 
-                        // Intento alternativo específico para elementos SVG
-                        try
+                        // Si es el último intento, intentar con Actions
+                        if (i == maxAttempts - 1)
                         {
-                            _logger.Debug("Intentando clic con JavaScript (getBoundingClientRect)...");
-                            ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                            function clickElement(element) {
-                                var rect = element.getBoundingClientRect();
-                                var centerX = rect.left + (rect.width / 2);
-                                var centerY = rect.top + (rect.height / 2);
-                                
-                                var clickEvent = new MouseEvent('click', {
-                                    'view': window,
-                                    'bubbles': true,
-                                    'cancelable': true,
-                                    'screenX': centerX,
-                                    'screenY': centerY,
-                                    'clientX': centerX,
-                                    'clientY': centerY
-                                });
-                                
-                                element.dispatchEvent(clickEvent);
-                            }
-                            clickElement(arguments[0]);
-                        ", element);
-                            await Task.Delay(500);
-                            return true;
-                        }
-                        catch (Exception jsEx2)
-                        {
-                            _logger.Warning($"Segundo método JavaScript falló: {jsEx2.Message}");
-
-                            // Si es el último intento, intentar con Actions
-                            if (i == maxAttempts - 1)
+                            try
                             {
-                                try
-                                {
-                                    _logger.Debug("Intentando clic con Actions...");
-                                    var actions = new Actions(_driver);
-                                    actions.MoveToElement(element).Click().Perform();
-                                    return true;
-                                }
-                                catch (Exception actionEx)
-                                {
-                                    _logger.Error($"Clic con Actions falló", actionEx);
-                                    throw;
-                                }
+                                _logger.Debug("Intentando clic con Actions...");
+                                var actions = new Actions(_driver);
+                                actions.MoveToElement(element).Click().Perform();
+                                return true;
+                            }
+                            catch (Exception actionEx)
+                            {
+                                _logger.Error($"Clic con Actions falló", actionEx);
+                                throw;
                             }
                         }
                     }
@@ -1875,7 +1907,14 @@ public class DetektorGpsScraper : ILocationScraper
                 if (i == maxAttempts - 1) throw;
             }
 
-            await Task.Delay(1000); // Espera entre intentos
+            // Espera breve entre intentos - sin usar Task.Delay fijo
+            var dynamicWait = new DynamicWaitHelper(_driver);
+            await dynamicWait.WaitForConditionAsync(
+                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                    .Any(e => e.Displayed),
+                "no_overlay",
+                TimeSpan.FromMilliseconds(300)
+            );
         }
 
         return false;
@@ -1886,7 +1925,14 @@ public class DetektorGpsScraper : ILocationScraper
         try
         {
             _logger.Debug("Iniciando búsqueda del ícono del vehículo...");
-            await Task.Delay(3000);
+            var dynamicWait = new DynamicWaitHelper(_driver);
+
+            // Esperar a que el mapa esté cargado
+            await dynamicWait.WaitForConditionAsync(
+                d => d.FindElements(By.TagName("svg")).Any(),
+                "svg_map_loaded",
+                TimeSpan.FromSeconds(3)
+            );
 
             // Primer intento de búsqueda normal
             _logger.Debug("Intentando búsqueda normal del ícono...");
@@ -1906,27 +1952,47 @@ public class DetektorGpsScraper : ILocationScraper
             {
                 // 1. Buscar y hacer clic en el botón "Ultimo Punto" del popup
                 _logger.Debug("Paso 1: Buscando botón 'Ultimo Punto' en el popup...");
-                var ultimoPuntoButton = _wait.Until(d =>
-                {
-                    try
+                IWebElement? ultimoPuntoButton = null;
+
+                // 2. Esperar a que el botón aparezca y esté visible
+                await dynamicWait.WaitForConditionAsync(
+                    d =>
                     {
-                        var button = d.FindElement(By.XPath("//a[contains(@class, 'button')][.//span[text()='Ultimo Punto']]"));
-                        _logger.Debug("Botón 'Ultimo Punto' encontrado");
-                        return button;
-                    }
-                    catch
-                    {
-                        _logger.Warning("No se encontró el botón 'Ultimo Punto' en este intento");
-                        return null;
-                    }
-                });
+                        try
+                        {
+                            var btn = d.FindElement(
+                                By.XPath("//a[contains(@class,'button')][.//span[text()='Ultimo Punto']]"));
+
+                            if (btn.Displayed)           // condición que debe cumplirse
+                            {
+                                ultimoPuntoButton = btn; // lo guardamos para usar luego
+                                return true;             // señalamos que la espera terminó
+                            }
+
+                            return false;                // todavía no cumple
+                        }
+                        catch (NoSuchElementException)   // el elemento aún no existe
+                        {
+                            return false;
+                        }
+                    },
+                    "ultimo_punto_button",
+                    TimeSpan.FromSeconds(2));            // timeout opcional
 
                 if (ultimoPuntoButton != null)
                 {
                     _logger.Debug("Intentando hacer clic en botón 'Ultimo Punto'...");
-                    await ClickElementWithRetry(ultimoPuntoButton);
-                    await Task.Delay(2000);
-                    _logger.Debug("Clic en 'Ultimo Punto' realizado");                    
+                    await ClickWhenClickableAsync(By.XPath("//a[contains(@class, 'button')][.//span[text()='Ultimo Punto']]"), cachedElement: ultimoPuntoButton);
+
+                    // Esperar a que la acción se complete
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                            .Any(e => e.Displayed),
+                        "after_ultimo_punto_click",
+                        TimeSpan.FromSeconds(2)
+                    );
+
+                    _logger.Debug("Clic en 'Ultimo Punto' realizado");
                 }
                 else
                 {
@@ -1936,26 +2002,43 @@ public class DetektorGpsScraper : ILocationScraper
 
                 // 2. Minimizar el popup usando el toggle
                 _logger.Debug("Paso 2: Buscando botón toggle para minimizar popup...");
-                var toggleButton = _wait.Until(d =>
-                {
-                    try
+                IWebElement? toggleButton = null;
+
+                await dynamicWait.WaitForConditionAsync(
+                    d =>
                     {
-                        var button = d.FindElement(By.Id("ext-gen17"));
-                        _logger.Debug("Botón toggle encontrado");
-                        return button;
-                    }
-                    catch
-                    {
-                        _logger.Warning("No se encontró el botón toggle en este intento");
-                        return null;
-                    }
-                });
+                        try
+                        {
+                            var btn = d.FindElement(By.Id("ext-gen17"));
+                            if (btn.Displayed)           // condición que debe cumplirse
+                            {
+                                toggleButton = btn;      // lo guardamos para usar luego
+                                return true;             // señalamos que la espera terminó
+                            }
+                            return false;                // todavía no cumple
+                        }
+                        catch (NoSuchElementException)   // el elemento aún no existe
+                        {
+                            return false;
+                        }
+                    },
+                    "toggle_button",
+                    TimeSpan.FromSeconds(2));            // timeout opcional
+                
 
                 if (toggleButton != null)
                 {
                     _logger.Debug("Intentando minimizar popup con botón toggle...");
-                    await ClickElementWithRetry(toggleButton);
-                    await Task.Delay(1000);
+                    await ClickWhenClickableAsync(By.Id("ext-gen17"), cachedElement: toggleButton);
+
+                    // Esperar a que la acción se complete
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                            .Any(e => e.Displayed),
+                        "after_toggle_click",
+                        TimeSpan.FromMilliseconds(1000)
+                    );
+
                     _logger.Debug("Popup minimizado correctamente");
                 }
                 else
@@ -1974,7 +2057,6 @@ public class DetektorGpsScraper : ILocationScraper
                         if (mapElement && mapElement.map) {
                             var map = mapElement.map;
                             var currentZoom = map.getZoom();
-                            _logger.LogInformation('Zoom actual: ' + currentZoom);
                             map.zoomTo(currentZoom - 2);
                             return true;
                         }
@@ -1984,12 +2066,19 @@ public class DetektorGpsScraper : ILocationScraper
                         return false;
                     }
                 ");
-                    await Task.Delay(2000);
+                    // Esperar a que el mapa se actualice
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                            .Any(e => e.Displayed),
+                        "after_zoom_out",
+                        TimeSpan.FromSeconds(2)
+                    );
+
                     _logger.Debug("Zoom out realizado correctamente");
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"Error al intentar hacer zoom out: {ex.Message}");                    
+                    _logger.Error($"Error al intentar hacer zoom out: {ex.Message}");
                 }
 
                 // 4. Intentar encontrar el ícono nuevamente
@@ -2027,7 +2116,7 @@ public class DetektorGpsScraper : ILocationScraper
         var vehicleIcon = await TryFindIconWithCurrentView();
         if (vehicleIcon != null)
         {
-            _logger.Debug("Ícono encontrado en primer intento con la vista actual");            
+            _logger.Debug("Ícono encontrado en primer intento con la vista actual");
             return vehicleIcon;
         }
 
@@ -2043,8 +2132,16 @@ public class DetektorGpsScraper : ILocationScraper
             if (ultimoPuntoButton != null)
             {
                 _logger.Debug("Intentando clic en botón 'Ultimo Punto'");
-                await ClickElementWithRetry(ultimoPuntoButton);
-                await Task.Delay(1000);
+                await ClickWhenClickableAsync(By.XPath("//a[contains(@class, 'button')]//span[text()='Ultimo Punto']/parent::a"), cachedElement: ultimoPuntoButton);
+
+                // Esperar a que la acción se complete
+                var dynamicWait = new DynamicWaitHelper(_driver);
+                await dynamicWait.WaitForConditionAsync(
+                    d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                        .Any(e => e.Displayed),
+                    "after_ultimo_punto_click",
+                    TimeSpan.FromMilliseconds(1000)
+                );
             }
 
             // 2.2 Minimizar el popup
@@ -2052,8 +2149,16 @@ public class DetektorGpsScraper : ILocationScraper
             if (toggleButton != null)
             {
                 _logger.Debug("Minimizando popup");
-                await ClickElementWithRetry(toggleButton);
-                await Task.Delay(1000);
+                await ClickWhenClickableAsync(By.Id("ext-gen17"));
+
+                // Esperar a que la acción se complete
+                var dynamicWait = new DynamicWaitHelper(_driver);
+                await dynamicWait.WaitForConditionAsync(
+                    d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                        .Any(e => e.Displayed),
+                    "after_toggle_click",
+                    TimeSpan.FromMilliseconds(1000)
+                );
             }
 
             // 2.3 Hacer zoom out mediante JavaScript
@@ -2071,7 +2176,7 @@ public class DetektorGpsScraper : ILocationScraper
                 
                 if (map) {
                     // Obtener zoom actual y hacer zoom out
-                    var currentZoom = map.getZoom();
+var currentZoom = map.getZoom();
                     map.zoomTo(currentZoom - 2);
                     
                     // Centrar el mapa
@@ -2088,14 +2193,20 @@ public class DetektorGpsScraper : ILocationScraper
         ");
 
             // Esperar a que el mapa se actualice
-            await Task.Delay(2000);
+            var mapUpdateWait = new DynamicWaitHelper(_driver);
+            await mapUpdateWait.WaitForConditionAsync(
+                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                    .Any(e => e.Displayed),
+                "after_zoom_out",
+                TimeSpan.FromSeconds(2)
+            );
 
             // 2.4 Reintentar búsqueda del ícono con la nueva vista
             return await TryFindIconWithCurrentView();
         }
         catch (Exception ex)
         {
-            _logger.Error($"Error en procedimiento de rescate: {ex.Message}");            
+            _logger.Error($"Error en procedimiento de rescate: {ex.Message}");
             return null;
         }
     }
@@ -2231,7 +2342,7 @@ public class DetektorGpsScraper : ILocationScraper
 
             if (betaButton != null)
             {
-                _logger.Debug("Botón 'Ultimo Punto (Beta)' encontrado");                
+                _logger.Debug("Botón 'Ultimo Punto (Beta)' encontrado");
                 return betaButton;
             }
 
@@ -2333,12 +2444,12 @@ public class DetektorGpsScraper : ILocationScraper
             // Si el JavaScript no funcionó, intentar con botones específicos
             var closingSelectors = new[]
             {
-            "//button[@id='btnClearEsat']",                          // Botón específico de encuesta
-            "//button[contains(@class, 'close')]",                   // Botones genéricos de cierre
-            "//div[contains(@class, 'modal')]//button",              // Botones en modales
-            "//button[contains(@class, 'btn-close')]",              // Bootstrap close buttons
-            "//*[contains(@class, 'modal')]//button[contains(@class, 'close')]" // Cualquier botón de cierre en modal
-        };
+                "//button[@id='btnClearEsat']",                          // Botón específico de encuesta
+                "//button[contains(@class, 'close')]",                   // Botones genéricos de cierre
+                "//div[contains(@class, 'modal')]//button",              // Botones en modales
+                "//button[contains(@class, 'btn-close')]",              // Bootstrap close buttons
+                "//*[contains(@class, 'modal')]//button[contains(@class, 'close')]" // Cualquier botón de cierre en modal
+            };
 
             foreach (var selector in closingSelectors)
             {
@@ -2349,7 +2460,7 @@ public class DetektorGpsScraper : ILocationScraper
                     {
                         try
                         {
-                            await ClickElementWithRetry(button);
+                            await ClickWhenClickableAsync(By.XPath(selector), cachedElement: button);
                             // Verificar si el popup realmente se cerró
                             var popupGone = await VerifyPopupClosed();
                             if (popupGone)
@@ -2396,13 +2507,13 @@ public class DetektorGpsScraper : ILocationScraper
                     // Verificar múltiples indicadores de popups
                     var checks = new[]
                     {
-                    "return !document.querySelector('div.encuesta')",
-                    "return !document.querySelector('.modal-backdrop')",
-                    "return !document.querySelector('[class*=\"modal\"][style*=\"display: block\"]')",
-                    "return !document.querySelector('[class*=\"popup\"][style*=\"display: block\"]')",
-                    "return !document.querySelector('.overlay:not([style*=\"display: none\"])')",
-                    "return document.body.style.overflow !== 'hidden'",
-                };
+                        "return !document.querySelector('div.encuesta')",
+                        "return !document.querySelector('.modal-backdrop')",
+                        "return !document.querySelector('[class*=\"modal\"][style*=\"display: block\"]')",
+                        "return !document.querySelector('[class*=\"popup\"][style*=\"display: block\"]')",
+                        "return !document.querySelector('.overlay:not([style*=\"display: none\"])')",
+                        "return document.body.style.overflow !== 'hidden'",
+                    };
 
                     foreach (var check in checks)
                     {
@@ -2497,10 +2608,10 @@ public class DetektorGpsScraper : ILocationScraper
             if (!string.IsNullOrEmpty(href))
             {
                 var directions = new Dictionary<string, decimal>
-            {
-                {"_n", 0}, {"_ne", 45}, {"_e", 90}, {"_se", 135},
-                {"_s", 180}, {"_sw", 225}, {"_w", 270}, {"_nw", 315}
-            };
+                {
+                    {"_n", 0}, {"_ne", 45}, {"_e", 90}, {"_se", 135},
+                    {"_s", 180}, {"_sw", 225}, {"_w", 270}, {"_nw", 315}
+                };
 
                 foreach (var dir in directions)
                 {
@@ -2543,9 +2654,17 @@ public class DetektorGpsScraper : ILocationScraper
 
                 if (acceptButton != null)
                 {
-                    await ClickElementWithRetry(acceptButton);
+                    await ClickWhenClickableAsync(By.XPath("//button[text()='Aceptar' or contains(@class, 'accept') or contains(@class, 'primary')]"), cachedElement: acceptButton);
                     _logger.Info("Popup de cambio de contraseña cerrado exitosamente", true);
-                    await Task.Delay(500); // Espera breve para que se complete la animación
+
+                    // Esperar a que el popup se cierre
+                    var dynamicWait = new DynamicWaitHelper(_driver);
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                            .Any(e => e.Displayed),
+                        "after_password_popup_close",
+                        TimeSpan.FromMilliseconds(500)
+                    );
                 }
                 else
                 {
@@ -2724,7 +2843,15 @@ public class DetektorGpsScraper : ILocationScraper
                 if (clickSuccess)
                 {
                     _logger.Info("Se cerró exitosamente el popup de cambio de contraseña", true);
-                    await Task.Delay(500); // Esperar a que se complete la animación
+
+                    // Esperar a que el popup se cierre
+                    var dynamicWait = new DynamicWaitHelper(_driver);
+                    await dynamicWait.WaitForConditionAsync(
+                        d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                            .Any(e => e.Displayed),
+                        "after_chrome_warning_close",
+                        TimeSpan.FromMilliseconds(500)
+                    );
                 }
                 else
                 {
@@ -2737,9 +2864,17 @@ public class DetektorGpsScraper : ILocationScraper
 
                         if (acceptButton != null)
                         {
-                            await ClickElementWithRetry(acceptButton);
+                            await ClickWhenClickableAsync(By.XPath("//button[contains(text(), 'Aceptar') or contains(text(), 'Accept')]"), cachedElement: acceptButton);
                             _logger.Info("Se cerró el popup usando el método convencional", true);
-                            await Task.Delay(500);
+
+                            // Esperar a que el popup se cierre
+                            var dynamicWait = new DynamicWaitHelper(_driver);
+                            await dynamicWait.WaitForConditionAsync(
+                                d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait"))
+                                    .Any(e => e.Displayed),
+                                "after_conventional_close",
+                                TimeSpan.FromMilliseconds(500)
+                            );
                         }
                         else
                         {
@@ -2757,6 +2892,137 @@ public class DetektorGpsScraper : ILocationScraper
         {
             _logger.Warning($"Error al intentar manejar el popup de advertencia de contraseña: {ex.Message}");
         }
+    }
+
+    private async Task<bool> ClickWhenClickableAsync(
+    By locator,
+    IWebElement? cachedElement = null,
+    TimeSpan? timeout = null,
+    int maxAttempts = 3,
+    CancellationToken ct = default)
+    {
+        timeout ??= TimeSpan.FromSeconds(8);
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                // ▸ 1. Obtener (o reutilizar) el elemento
+                IWebElement element;
+                if (cachedElement is not null)
+                {
+                    element = cachedElement;
+                }
+                else
+                {
+                    var wait = new WebDriverWait(_driver, timeout.Value)
+                    {
+                        PollingInterval = TimeSpan.FromMilliseconds(100)
+                    };
+                    // IgnoreExceptionTypes devuelve void ⇒ llamada independiente
+                    wait.IgnoreExceptionTypes(
+                        typeof(NoSuchElementException),
+                        typeof(StaleElementReferenceException));
+
+                    element = wait.Until(drv =>
+                    {
+                        var el = drv.FindElement(locator);
+                        return (el.Displayed && el.Enabled) ? el : null;
+                    });
+                }
+
+                // ▸ 2. Scroll al centro
+                ((IJavaScriptExecutor)_driver)
+                    .ExecuteScript(
+                        "arguments[0].scrollIntoView({block:'center',inline:'center'});",
+                        element);
+
+                // ▸ 3. Clic normal
+                try { element.Click(); return true; }
+                catch (Exception ex) { _logger.Debug($"Clic nativo falló: {ex.Message}"); }
+
+                // ▸ 4. Clic JavaScript
+                try
+                {
+                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", element);
+                    return true;
+                }
+                catch (Exception ex) { _logger.Debug($"Clic JS falló: {ex.Message}"); }
+
+                // ▸ 5. Clic Actions
+                try
+                {
+                    new Actions(_driver).MoveToElement(element).Click().Perform();
+                    return true;
+                }
+                catch (Exception ex) { _logger.Debug($"Clic Actions falló: {ex.Message}"); }
+
+                // ▸ 6. dispatchEvent como último recurso
+                try
+                {
+                    ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    const r = arguments[0].getBoundingClientRect();
+                    arguments[0].dispatchEvent(new MouseEvent('click',{
+                        bubbles:true,cancelable:true,view:window,
+                        clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
+                ", element);
+                    return true;
+                }
+                catch (Exception ex) { _logger.Debug($"dispatchEvent falló: {ex.Message}"); }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning($"Intento {attempt}/{maxAttempts} falló: {ex.Message}");
+            }
+
+            // ▸ 7. Breve pausa antes de reintentar (120–300 ms)
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(Math.Min(300, timeout.Value.TotalMilliseconds / 25)),
+                ct);
+        }
+
+        return false;   // Agotados los intentos
+    }
+
+    private async Task WaitForNoOverlayAsync(TimeSpan? timeout = null)
+    {
+        timeout ??= TimeSpan.FromSeconds(3);
+        var dynamicWait = new DynamicWaitHelper(_driver);
+
+        await dynamicWait.WaitForConditionAsync(
+            d => !d.FindElements(By.CssSelector(".loading,.spinner,.wait,.ui-table-loading"))
+                  .Any(e => e.Displayed),
+            "no_overlay",
+            timeout);
+    }
+
+    private async Task<IWebElement?> WaitForVehiclePopupAsync(
+     TimeSpan? timeout = null,
+     CancellationToken ct = default)
+    {
+        timeout ??= TimeSpan.FromSeconds(12);
+
+        // El popup se dibuja fuera del <iframe>; garantizamos el contexto adecuado
+        _driver.SwitchTo().DefaultContent();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // FindElements → lista vacía = sin excepción (patrón recomendado) :contentReference[oaicite:3]{index=3}
+            var popup = _driver.FindElements(By.CssSelector("div.olFramedCloudPopupContent"))
+                               .FirstOrDefault(el => el.Displayed &&
+                                                     !string.IsNullOrWhiteSpace(el.Text));
+
+            if (popup != null) return popup;
+
+            await Task.Delay(250, ct);          // fluent-wait manual de 250 ms :contentReference[oaicite:4]{index=4}
+        }
+
+        return null;                            // devolvemos null en vez de lanzar
     }
 
     public void Dispose()
