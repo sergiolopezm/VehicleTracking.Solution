@@ -150,6 +150,40 @@ builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISimonMovilidadGps.I
     );
 });
 
+// Satrack GPS Services
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISatrackGps.ILocationScraperFactory>(sp => {
+    var fileLogger = sp.GetRequiredService<IFileLogger>();
+    var logRepository = sp.GetRequiredService<IRepositoryLogger>();
+    var settings = sp.GetRequiredService<IOptions<TrackingSettings>>();
+    return new VehicleTracking.Domain.Services.SatrackGps.LocationScraperFactory(
+        fileLogger,
+        logRepository,
+        settings
+    );
+});
+
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISatrackGps.IVehicleTrackingRepository>(sp => {
+    var contextFactory = sp.GetRequiredService<IDbContextFactory<DBContext>>();
+    var settings = sp.GetRequiredService<IOptions<TrackingSettings>>();
+    return new VehicleTracking.Domain.Services.SatrackGps.VehicleTrackingRepository(
+        contextFactory,
+        settings
+    );
+});
+
+builder.Services.AddScoped<VehicleTracking.Domain.Contracts.ISatrackGps.ITrackingService>(sp => {
+    var factory = sp.GetRequiredService<VehicleTracking.Domain.Contracts.ISatrackGps.ILocationScraperFactory>();
+    var repository = sp.GetRequiredService<VehicleTracking.Domain.Contracts.ISatrackGps.IVehicleTrackingRepository>();
+    var logRepository = sp.GetRequiredService<ILogRepository>();
+    var contextFactory = sp.GetRequiredService<IDbContextFactory<DBContext>>();
+    return new VehicleTracking.Domain.Services.SatrackGps.TrackingService(
+        repository,
+        factory,
+        logRepository,
+        contextFactory
+    );
+});
+
 // Additional configurations for Selenium
 builder.Services.AddHttpClient();
 

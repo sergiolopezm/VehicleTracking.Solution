@@ -1,10 +1,10 @@
 ﻿using Microsoft.Extensions.Options;
-using VehicleTracking.Domain.Contracts.ISimonMovilidadGps;
-using VehicleTracking.Domain.Scraping.SimonMovilidadGps;
+using VehicleTracking.Domain.Contracts.ISatrackGps;
+using VehicleTracking.Domain.Scraping.SatrackGps;
 using VehicleTracking.Shared.InDTO.InDTOGps;
 using VehicleTracking.Util.Helpers;
 
-namespace VehicleTracking.Domain.Services.SimonMovilidadGps
+namespace VehicleTracking.Domain.Services.SatrackGps
 {
     public class LocationScraperFactory : ILocationScraperFactory
     {
@@ -24,6 +24,7 @@ namespace VehicleTracking.Domain.Services.SimonMovilidadGps
 
         public ILocationScraper CreateScraper(string provider)
         {
+            // Por defecto usamos "SYSTEM" como userId e ip cuando no se proporciona contexto
             return CreateScraperWithContext(provider, "SYSTEM", "SYSTEM");
         }
 
@@ -31,8 +32,8 @@ namespace VehicleTracking.Domain.Services.SimonMovilidadGps
         {
             return provider.ToUpper() switch
             {
-                var p when p == _settings.Value.Providers.SimonMovilidad.Name.ToUpper()
-                    => new SimonMovilidadGpsScraper(_fileLogger, _logRepository, _settings, userId, ip),
+                var p when p == _settings.Value.Providers.Satrack.Name.ToUpper()
+                    => new SatrackGpsScraper(_fileLogger, _logRepository, _settings, userId, ip),
                 _ => throw new NotSupportedException($"Provider {provider} no soportado")
             };
         }
