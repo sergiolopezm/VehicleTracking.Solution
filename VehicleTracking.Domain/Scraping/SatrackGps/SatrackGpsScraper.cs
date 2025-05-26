@@ -80,7 +80,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             }
         }
 
-        public async Task<bool> LoginAsync(string username, string password)
+        public async Task<bool> LoginAsync(string username, string password, string patent)
         {
             try
             {
@@ -91,11 +91,11 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 // Validar que las credenciales no estén vacías
                 if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
                 {
-                    _logger.Warning($"Credenciales inválidas para el vehículo {_currentPatent}: usuario o contraseña están vacíos", true);
+                    _logger.Warning($"Credenciales inválidas para el vehículo {patent}: usuario o contraseña están vacíos", true);
                     return false;
                 }
 
-                _logger.Debug($"Iniciando proceso de login para vehículo {_currentPatent}");
+                _logger.Debug($"Iniciando proceso de login para vehículo {patent}");
                 var dynamicWait = new DynamicWaitHelper(_driver);
 
                 _logger.Debug("Navegando a la URL base...");
@@ -108,43 +108,46 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
 
                 // Esperar y buscar el campo de usuario
                 _logger.Debug("Buscando campo de usuario...");
+                // Para el campo de usuario
                 var (userInput, userError) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector("input[type='text'][name='username']"),
+                    By.Id("txt_login_username"),  // Cambiado a usar ID
                     "login_username",
                     ensureClickable: true
                 );
 
                 if (userInput == null)
                 {
-                    _logger.Warning($"No se pudo encontrar el campo de usuario para el vehículo {_currentPatent}. Detalles del error: {userError}", true);
+                    _logger.Warning($"No se pudo encontrar el campo de usuario para el vehículo {patent}. Detalles del error: {userError}", true);
                     return false;
                 }
 
                 // Esperar y buscar el campo de contraseña
                 _logger.Debug("Buscando campo de contraseña...");
+                // Para el campo de contraseña
                 var (passInput, passError) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector("input[type='password'][name='password']"),
+                    By.Id("txt_login_password"),  // Cambiado a usar ID
                     "login_password",
                     ensureClickable: true
                 );
 
                 if (passInput == null)
                 {
-                    _logger.Warning($"No se pudo encontrar el campo de contraseña para el vehículo {_currentPatent}. Detalles del error: {passError}", true);
+                    _logger.Warning($"No se pudo encontrar el campo de contraseña para el vehículo {patent}. Detalles del error: {passError}", true);
                     return false;
                 }
 
                 // Buscar el botón de login
                 _logger.Debug("Buscando botón de login...");
+                // Para el botón de login
                 var (loginButton, buttonError) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector("button#iniciarSesion"),
+                    By.Id("btn_login_login"),  // Cambiado a usar ID
                     "login_button",
                     ensureClickable: true
                 );
 
                 if (loginButton == null)
                 {
-                    _logger.Warning($"No se pudo encontrar el botón de inicio de sesión para el vehículo {_currentPatent}. Detalles del error: {buttonError}", true);
+                    _logger.Warning($"No se pudo encontrar el botón de inicio de sesión para el vehículo {patent}. Detalles del error: {buttonError}", true);
                     return false;
                 }
 
@@ -230,7 +233,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             }
             catch (Exception ex)
             {
-                _logger.Error($"Error durante el proceso de login para usuario: {username} y vehículo {_currentPatent}", ex);
+                _logger.Error($"Error durante el proceso de login para usuario: {username} y vehículo {patent}", ex);
                 return false;
             }
         }

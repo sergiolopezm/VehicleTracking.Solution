@@ -29,6 +29,8 @@ namespace VehicleTracking.Domain.Services.SatrackGps
 
         public async Task<LocationDataInfo?> GetVehicleStatusAsync(string patent, string idUsuario, string ip)
         {
+            ILocationScraper? scraper = null;
+
             try
             {
                 _log.Info(idUsuario, ip, "GetVehicleStatus",
@@ -44,9 +46,9 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                     return null;
                 }
 
-                using var scraper = _scraperFactory.CreateScraperWithContext(vehicle.Provider, idUsuario, ip);
+                scraper = _scraperFactory.CreateScraperWithContext(vehicle.Provider, idUsuario, ip);
 
-                var loginSuccess = await scraper.LoginAsync(vehicle.User, vehicle.Password);
+                var loginSuccess = await scraper.LoginAsync(vehicle.User, vehicle.Password, vehicle.Patent);
                 if (!loginSuccess)
                 {
                     _log.Error(idUsuario, ip, "GetVehicleStatus",
@@ -71,6 +73,11 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                     $"Error al obtener estado del vehículo {patent}: {ex.Message}");
                 throw;
             }
+            finally
+            {
+                // Asegurar que se libere el scraper
+                scraper?.Dispose();
+            }
         }
 
         public async Task<ListaPaginada<VehicleTrackingResultDto>> TrackVehiclesAsync(string idUsuario, string ip)
@@ -91,90 +98,144 @@ namespace VehicleTracking.Domain.Services.SatrackGps
 
                 var results = new List<VehicleTrackingResultDto>();
 
-                foreach (var group in vehicles.GroupBy(v => v.Provider))
+                // Procesar cada vehículo individualmente con su propio scraper
+                foreach (var vehicle in vehicles)
                 {
-                    using var scraper = _scraperFactory.CreateScraperWithContext(group.Key, idUsuario, ip);
-                    var locationDataBatch = new List<(Vehicle Vehicle, LocationDataInfo Data)>();
-
-                    foreach (var vehicle in group)
+                    ILocationScraper? scraper = null;
+                    var result = new VehicleTrackingResultDto
                     {
-                        var result = new VehicleTrackingResultDto
-                        {
-                            Patent = vehicle.Patent,
-                            ProcessedAt = DateTime.UtcNow
-                        };
+                        Patent = vehicle.Patent,
+                        ProcessedAt = DateTime.UtcNow
+                    };
 
+                    try
+                    {
+                        _log.Info(idUsuario, ip, "TrackVehicles",
+                            $"Iniciando procesamiento de vehículo {vehicle.Patent}");
+
+                        // Crear un nuevo scraper para cada vehículo
+                        scraper = _scraperFactory.CreateScraperWithContext(vehicle.Provider, idUsuario, ip);
+
+                        var loginSuccess = await scraper.LoginAsync(vehicle.User, vehicle.Password, vehicle.Patent);
+                        if (!loginSuccess)
+                        {
+                            result.Success = false;
+                            result.Message = "No se pudo iniciar sesión con las credenciales proporcionadas";
+                            result.Status = "Error de autenticación";
+
+                            _log.Error(idUsuario, ip, "TrackVehicles",
+                                $"Error de autenticación para vehículo {vehicle.Patent}");
+
+                            results.Add(result);
+                            continue;
+                        }
+
+                        var locationData = await scraper.GetVehicleLocationAsync(vehicle.Patent);
+                        if (locationData != null)
+                        {
+                            using var context = await _contextFactory.CreateDbContextAsync();
+                            var tracking = new VehicleInfoLocation
+                            {
+                                VehicleId = vehicle.Id,
+                                ManifestId = vehicle.VehicleInfoLocations.First().ManifestId,
+                                Latitude = locationData.Latitude,
+                                Longitude = locationData.Longitude,
+                                Speed = locationData.Speed,
+                                Timestamp = locationData.Timestamp,
+                                Provider = vehicle.Provider,
+                                Created = DateTime.UtcNow,
+                                IsActive = true,
+                                Reason = locationData.Reason,
+                                Driver = locationData.Driver,
+                                Georeference = locationData.Georeference,
+                                InZone = locationData.InZone,
+                                DetentionTime = locationData.DetentionTime,
+                                DistanceTraveled = locationData.DistanceTraveled,
+                                Temperature = locationData.Temperature,
+                                Location = new GeoPoint(
+                                    Convert.ToDouble(locationData.Latitude),
+                                    Convert.ToDouble(locationData.Longitude)
+                                ).ToPoint(),
+                                Angle = (short?)locationData.Angle
+                            };
+
+                            await context.VehicleInfoLocations.AddAsync(tracking);
+                            await context.SaveChangesAsync();
+
+                            result.Success = true;
+                            result.Message = "Ubicación registrada exitosamente";
+                            result.Status = "Procesado";
+                            result.Latitude = locationData.Latitude;
+                            result.Longitude = locationData.Longitude;
+
+                            _log.Info(idUsuario, ip, "TrackVehicles",
+                                $"Vehículo {vehicle.Patent} procesado exitosamente");
+                        }
+                        else
+                        {
+                            result.Success = false;
+                            result.Message = "No se pudo obtener información de ubicación";
+                            result.Status = "Sin datos";
+
+                            _log.Error(idUsuario, ip, "TrackVehicles",
+                                $"No se pudo obtener información de ubicación para vehículo {vehicle.Patent}");
+                        }
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message.StartsWith("CONFIGURACION_INVALIDA:"))
+                    {
+                        result.Success = false;
+                        result.Message = "El vehículo no está disponible con las credenciales actuales";
+                        result.Status = "Error de configuración";
+
+                        _log.Error(idUsuario, ip, "TrackVehicles",
+                            $"Error de configuración para vehículo {vehicle.Patent}: {ex.Message}");
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message.StartsWith("SERVIDOR_CAIDO:"))
+                    {
+                        result.Success = false;
+                        result.Message = "Error de conectividad con el servidor";
+                        result.Status = "Error de servidor";
+
+                        _log.Error(idUsuario, ip, "TrackVehicles",
+                            $"Error de servidor para vehículo {vehicle.Patent}: {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Success = false;
+                        result.Message = "Error durante el procesamiento del vehículo";
+                        result.Status = "Error interno";
+
+                        _log.Error(idUsuario, ip, "TrackVehicles",
+                            $"Error procesando vehículo {vehicle.Patent}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        // IMPORTANTE: Cerrar y liberar el scraper después de cada vehículo
+                        // Esto asegura que cada vehículo tenga una nueva sesión de navegador
                         try
                         {
-                            var loginSuccess = await scraper.LoginAsync(vehicle.User, vehicle.Password);
-                            if (!loginSuccess)
-                            {
-                                result.Success = false;
-                                result.Message = "No se pudo iniciar sesión con las credenciales proporcionadas";
-                                result.Status = "Error de autenticación";
-                                results.Add(result);
-                                continue;
-                            }
-
-                            var locationData = await scraper.GetVehicleLocationAsync(vehicle.Patent);
-                            if (locationData != null)
-                            {
-                                using var context = await _contextFactory.CreateDbContextAsync();
-                                var tracking = new VehicleInfoLocation
-                                {
-                                    VehicleId = vehicle.Id,
-                                    ManifestId = vehicle.VehicleInfoLocations.First().ManifestId,
-                                    Latitude = locationData.Latitude,
-                                    Longitude = locationData.Longitude,
-                                    Speed = locationData.Speed,
-                                    Timestamp = locationData.Timestamp,
-                                    Provider = vehicle.Provider,
-                                    Created = DateTime.UtcNow,
-                                    IsActive = true,
-                                    Reason = locationData.Reason,
-                                    Driver = locationData.Driver,
-                                    Georeference = locationData.Georeference,
-                                    InZone = locationData.InZone,
-                                    DetentionTime = locationData.DetentionTime,
-                                    DistanceTraveled = locationData.DistanceTraveled,
-                                    Temperature = locationData.Temperature,
-                                    Location = new GeoPoint(
-                                        Convert.ToDouble(locationData.Latitude),
-                                        Convert.ToDouble(locationData.Longitude)
-                                    ).ToPoint(),
-                                    Angle = (short?)locationData.Angle
-                                };
-
-                                await context.VehicleInfoLocations.AddAsync(tracking);
-                                await context.SaveChangesAsync();
-
-                                result.Success = true;
-                                result.Message = "Ubicación registrada exitosamente";
-                                result.Status = "Procesado";
-                                result.Latitude = locationData.Latitude;
-                                result.Longitude = locationData.Longitude;
-                            }
+                            scraper?.Dispose();
+                            _log.Info(idUsuario, ip, "TrackVehicles",
+                                $"Scraper cerrado correctamente para vehículo {vehicle.Patent}");
                         }
-                        catch (InvalidOperationException ex) when (ex.Message.StartsWith("CONFIGURACION_INVALIDA:"))
+                        catch (Exception disposeEx)
                         {
-                            result.Success = false;
-                            result.Message = "El vehículo no está disponible con las credenciales actuales";
-                            result.Status = "Error de configuración";
-                            _log.Error(idUsuario, ip, "TrackVehicles",
-                                $"Error procesando vehículo {vehicle.Patent}: {ex.Message}");
+                            _log.Info(idUsuario, ip, "TrackVehicles",
+                                $"Error al cerrar scraper para vehículo {vehicle.Patent}: {disposeEx.Message}");
                         }
-                        catch (Exception ex)
-                        {
-                            result.Success = false;
-                            result.Message = "Error durante el procesamiento del vehículo";
-                            result.Status = "Error interno";
-                            _log.Error(idUsuario, ip, "TrackVehicles",
-                                $"Error procesando vehículo {vehicle.Patent}: {ex.Message}");
-                        }
-
-                        results.Add(result);
                     }
+
+                    results.Add(result);
+
+                    // Breve pausa entre vehículos para evitar sobrecargar el servidor
+                    await Task.Delay(1000);
                 }
+
+                var exitosos = results.Count(r => r.Success);
+                var fallidos = results.Count - exitosos;
+
+                _log.Info(idUsuario, ip, "TrackVehicles",
+                    $"Proceso de tracking completado. Total: {results.Count}, Exitosos: {exitosos}, Fallidos: {fallidos}");
 
                 return new ListaPaginada<VehicleTrackingResultDto>
                 {
@@ -194,6 +255,7 @@ namespace VehicleTracking.Domain.Services.SatrackGps
 
         private async Task SaveVehicleTracking(Vehicle vehicle, LocationDataInfo locationData)
         {
+            using var context = await _contextFactory.CreateDbContextAsync();
             var tracking = new VehicleInfoLocation
             {
                 VehicleId = vehicle.Id,
@@ -212,6 +274,10 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                 DetentionTime = locationData.DetentionTime,
                 DistanceTraveled = locationData.DistanceTraveled,
                 Temperature = locationData.Temperature,
+                Location = new GeoPoint(
+                    Convert.ToDouble(locationData.Latitude),
+                    Convert.ToDouble(locationData.Longitude)
+                ).ToPoint(),
                 Angle = (short?)locationData.Angle
             };
 
