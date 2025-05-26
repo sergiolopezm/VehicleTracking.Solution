@@ -108,9 +108,8 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
 
                 // Esperar y buscar el campo de usuario
                 _logger.Debug("Buscando campo de usuario...");
-                // Para el campo de usuario
                 var (userInput, userError) = await dynamicWait.WaitForElementAsync(
-                    By.Id("txt_login_username"),  // Cambiado a usar ID
+                    By.Id("txt_login_username"),
                     "login_username",
                     ensureClickable: true
                 );
@@ -123,9 +122,8 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
 
                 // Esperar y buscar el campo de contraseña
                 _logger.Debug("Buscando campo de contraseña...");
-                // Para el campo de contraseña
                 var (passInput, passError) = await dynamicWait.WaitForElementAsync(
-                    By.Id("txt_login_password"),  // Cambiado a usar ID
+                    By.Id("txt_login_password"),
                     "login_password",
                     ensureClickable: true
                 );
@@ -136,13 +134,12 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     return false;
                 }
 
-                // Buscar el botón de login
-                _logger.Debug("Buscando botón de login...");
-                // Para el botón de login
+                // Buscar el botón de login (SIN exigir que sea clickable inicialmente)
+                _logger.Debug("Buscando botón de login (sin exigir que sea clickable)...");
                 var (loginButton, buttonError) = await dynamicWait.WaitForElementAsync(
-                    By.Id("btn_login_login"),  // Cambiado a usar ID
+                    By.Id("btn_login_login"),
                     "login_button",
-                    ensureClickable: true
+                    ensureClickable: false  // Cambiado a false porque el botón está deshabilitado inicialmente
                 );
 
                 if (loginButton == null)
@@ -152,19 +149,91 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 }
 
                 _logger.Debug("Limpiando y llenando campos del formulario...");
-                userInput.Clear();
-                passInput.Clear();
 
-                await Task.WhenAll(
-                    Task.Run(() => userInput.SendKeys(username)),
-                    Task.Run(() => passInput.SendKeys(password))
-                );
+                // Rellenar usuario
+                userInput.Clear();
+                userInput.SendKeys(username);
+
+                // Establecer valor directamente con JavaScript para asegurar que Angular lo detecte
+                ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            arguments[0].value = arguments[1];
+            arguments[0].dispatchEvent(new Event('input', { bubbles:true }));
+        ", userInput, username);
+
+                // Rellenar contraseña
+                passInput.Clear();
+                passInput.SendKeys(password);
+
+                // Establecer valor directamente con JavaScript para asegurar que Angular lo detecte
+                ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            arguments[0].value = arguments[1];
+            arguments[0].dispatchEvent(new Event('input', { bubbles:true }));
+        ", passInput, password);
+
+                // Forzar blur para que Angular valide el formulario
+                _logger.Debug("Enviando Tab para forzar validación de formulario...");
+                passInput.SendKeys(Keys.Tab);
+
+                // Esperar a que el botón se habilite
+                _logger.Debug("Esperando que el botón de login se habilite...");
+                var wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(10));
+                try
+                {
+                    wait.Until(drv => {
+                        try
+                        {
+                            return loginButton.Enabled;
+                        }
+                        catch (StaleElementReferenceException)
+                        {
+                            return false;
+                        }
+                    });
+                    _logger.Debug("El botón de login ahora está habilitado");
+                }
+                catch (WebDriverTimeoutException)
+                {
+                    _logger.Warning($"El botón de login no se habilitó después de llenar los campos para el vehículo {patent}", true);
+
+                    // Capturar screenshot para diagnóstico
+                    try
+                    {
+                        Screenshot screenshot = ((ITakesScreenshot)_driver).GetScreenshot();
+                        var screenshotPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"login_timeout_{DateTime.Now:yyyyMMddHHmmss}.png");
+                        screenshot.SaveAsFile(screenshotPath);
+                        _logger.Debug($"Captura de pantalla guardada en: {screenshotPath}");
+                    }
+                    catch { }
+
+                    return false;
+                }
 
                 // Verificar estado antes de intentar el login
                 await CheckPageStatus("pre-login");
 
-                _logger.Debug("Intentando hacer clic en el botón de login...");
-                await ClickWhenClickableAsync(By.CssSelector("button#iniciarSesion"), cachedElement: loginButton);
+                // Ahora que el botón está habilitado, hacer clic
+                _logger.Debug("Intentando hacer clic en el botón de login habilitado...");
+                try
+                {
+                    loginButton.Click();
+                    _logger.Debug("Clic en botón de login ejecutado correctamente");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al hacer clic en el botón de login: {ex.Message}", true);
+
+                    // Intentar clic alternativo con JavaScript
+                    try
+                    {
+                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", loginButton);
+                        _logger.Debug("Clic en botón de login ejecutado con JavaScript");
+                    }
+                    catch (Exception jsEx)
+                    {
+                        _logger.Warning($"Error al hacer clic con JavaScript: {jsEx.Message}", true);
+                        return false;
+                    }
+                }
 
                 // Manejar posible popup de contraseña de Chrome
                 await HandleChromePasswordWarningIfPresent();
@@ -1144,11 +1213,11 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
         }
 
         private async Task<bool> ClickWhenClickableAsync(
-            By locator,
-            IWebElement? cachedElement = null,
-            TimeSpan? timeout = null,
-            int maxAttempts = 3,
-            CancellationToken ct = default)
+    By locator,
+    IWebElement? cachedElement = null,
+    TimeSpan? timeout = null,
+    int maxAttempts = 3,
+    CancellationToken ct = default)
         {
             timeout ??= TimeSpan.FromSeconds(8);
 
@@ -1211,11 +1280,11 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     try
                     {
                         ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                        const r = arguments[0].getBoundingClientRect();
-                        arguments[0].dispatchEvent(new MouseEvent('click',{
-                            bubbles:true,cancelable:true,view:window,
-                            clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
-                    ", element);
+                const r = arguments[0].getBoundingClientRect();
+                arguments[0].dispatchEvent(new MouseEvent('click',{
+                    bubbles:true,cancelable:true,view:window,
+                    clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
+            ", element);
                         return true;
                     }
                     catch (Exception ex) { _logger.Debug($"dispatchEvent falló: {ex.Message}"); }
