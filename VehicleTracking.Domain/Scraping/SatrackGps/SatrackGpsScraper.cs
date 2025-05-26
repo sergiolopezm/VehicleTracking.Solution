@@ -349,7 +349,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     await NavigateToVehiclesSection(dynamicWait);
 
                     // 4️⃣ Esperar de forma **optimizada** a que la lista de vehículos esté lista
-                    var listReady = await WaitForVehicleListReady(dynamicWait, TimeSpan.FromSeconds(15)); // Reducido de 60s
+                    var listReady = await WaitForVehicleListReady(dynamicWait, TimeSpan.FromSeconds(8)); // Reducido de 60s
                     if (!listReady)
                     {
                         _logger.Warning("La lista de vehículos no estuvo disponible, pero continuando...", true);
@@ -1536,7 +1536,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     {
                         return false;
                     }
-                }, "map_loaded", TimeSpan.FromSeconds(15));
+                }, "map_loaded", TimeSpan.FromSeconds(8));
 
                 if (!mapLoaded)
                 {
@@ -2331,7 +2331,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
         DynamicWaitHelper dynamicWait,
         TimeSpan? maxWait = null)
         {
-            maxWait ??= TimeSpan.FromSeconds(60);
+            maxWait ??= TimeSpan.FromSeconds(20);
             var deadline = DateTime.Now + maxWait.Value;
 
             while (DateTime.Now < deadline)
@@ -2543,46 +2543,197 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             {
                 _logger.Debug($"Verificación rápida si placa {patent} está lista...");
 
+                // Aumentar tiempo por defecto a 5 segundos para dar más oportunidad de encontrar la placa
                 var deadline = DateTime.Now.AddSeconds(timeoutSeconds);
+                var lastCheckTime = DateTime.MinValue;
+                var checkInterval = 50; // Intervalo de verificación más rápido (ms)
 
                 while (DateTime.Now < deadline)
                 {
                     try
                     {
+                        // Optimización: Verificar estado de carga antes de buscar la placa
+                        if ((DateTime.Now - lastCheckTime).TotalMilliseconds > 500)
+                        {
+                            var loadingState = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                        return {
+                            anyLoading: !!document.querySelector('.loading, .spinner, .wait, [class*=""loading""]'),
+                            bodyHidden: document.body.style.display === 'none' || document.body.style.visibility === 'hidden',
+                            ajaxActive: typeof $ !== 'undefined' && $.active > 0
+                        };
+                    ");
+
+                            if (loadingState is Dictionary<string, object> state)
+                            {
+                                bool anyLoading = Convert.ToBoolean(state["anyLoading"]);
+                                bool bodyHidden = Convert.ToBoolean(state["bodyHidden"]);
+
+                                // Si todavía está cargando, esperamos un poco más antes de buscar
+                                if (anyLoading || bodyHidden)
+                                {
+                                    await Task.Delay(100);
+                                    lastCheckTime = DateTime.Now;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Script de búsqueda mejorado con más selectores específicos y optimizaciones
                         var plateReady = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
                     try {
                         const patent = arguments[0];
+                        const results = { found: false, method: '', element: null };
+
+                        // OPTIMIZACIÓN 1: Verificar si la tabla ya está lista
+                        const tableReady = (
+                            document.querySelector('[class*=""vehicle-list""], [class*=""veh-list""], [id*=""cdk_scroll""]') !== null &&
+                            !document.querySelector('.loading, .spinner, .wait, [class*=""loading""]')
+                        );
                         
-                        // Buscar la placa específica por múltiples métodos
-                        const selectors = [
+                        if (!tableReady) {
+                            return { 
+                                found: false, 
+                                reason: 'Tabla no lista',
+                                tableStatus: {
+                                    tableElement: !!document.querySelector('[class*=""vehicle-list""]'),
+                                    loading: !!document.querySelector('.loading, .spinner')
+                                }
+                            };
+                        }
+
+                        // OPTIMIZACIÓN 2: Búsqueda prioritaria por ID y selectores específicos primero
+                        const prioritySelectors = [
+                            // Selectores exactos para la placa
                             `span.notranslate[textContent=""${patent}""]`,
-                            `[id*=""${patent}""]`,
-                            `*`
+                            `div[id=""${patent}_alias""]`,
+                            `div[id=""${patent}alias""]`,
+                            `div[id*=""${patent}""]`,
+                            `[class*=""plate""][id*=""${patent}""]`,
+                            // Selectores para elementos tr/td que contienen la placa
+                            `td:nth-child(3)[textContent=""${patent}""]`,
+                            `tr.ng-star-inserted td:nth-child(3)`,
+                            // Selector más genérico pero directo para elementos visibles
+                            `div[class*=""item-veh""]`
                         ];
                         
-                        for (const selector of selectors) {
+                        // Iteramos por prioridad para encontrar la placa rápidamente
+                        for (const selector of prioritySelectors) {
                             let elements;
-                            if (selector === '*') {
-                                // Búsqueda exhaustiva como último recurso
-                                elements = Array.from(document.querySelectorAll('*')).filter(el => 
-                                    el.textContent && el.textContent.trim() === patent
-                                );
+                            if (selector === 'tr.ng-star-inserted td:nth-child(3)') {
+                                // Búsqueda específica para tablas Angular
+                                elements = Array.from(document.querySelectorAll(selector))
+                                    .filter(el => el.textContent && el.textContent.trim() === patent);
                             } else {
                                 elements = Array.from(document.querySelectorAll(selector));
                             }
                             
+                            // Verificar elementos encontrados
                             for (const el of elements) {
-                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && 
-                                    (el.textContent && el.textContent.trim() === patent || 
-                                     el.id && el.id.includes(patent))) {
-                                    return { found: true, method: selector };
+                                if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                                    // Verificación adicional para texto exacto
+                                    if (el.textContent && el.textContent.trim() === patent) {
+                                        results.found = true;
+                                        results.method = selector + ':exact-text';
+                                        results.element = el;
+                                        return results;
+                                    }
+                                    // Verificación por ID
+                                    else if (el.id && el.id.includes(patent)) {
+                                        results.found = true;
+                                        results.method = selector + ':id-match';
+                                        results.element = el;
+                                        return results;
+                                    }
+                                    // Para elementos genéricos, verificar si tienen un hijo con la placa
+                                    else if (selector === 'div[class*=""item-veh""]') {
+                                        if (el.textContent && el.textContent.includes(patent)) {
+                                            results.found = true;
+                                            results.method = selector + ':contains-text';
+                                            results.element = el;
+                                            return results;
+                                        }
+                                    }
                                 }
                             }
                         }
                         
-                        return { found: false, reason: 'Placa no encontrada' };
+                        // OPTIMIZACIÓN 3: Búsqueda a través de elementos de tabla
+                        const rows = document.querySelectorAll('tr');
+                        for (const row of rows) {
+                            if (row.textContent && row.textContent.includes(patent)) {
+                                const cells = row.querySelectorAll('td');
+                                for (const cell of cells) {
+                                    if (cell.textContent && cell.textContent.trim() === patent) {
+                                        results.found = true;
+                                        results.method = 'table-scan:exact-cell';
+                                        results.element = cell;
+                                        return results;
+                                    }
+                                }
+                                
+                                // Si encontramos la fila pero no la celda exacta, tomamos la fila
+                                results.found = true;
+                                results.method = 'table-scan:row-contains';
+                                results.element = row;
+                                return results;
+                            }
+                        }
+                        
+                        // OPTIMIZACIÓN 4: Verificar si la placa aparece en cualquier lista virtual
+                        const virtualItems = document.querySelectorAll('[class*=""virtual-scroll""] [class*=""item""]');
+                        for (const item of virtualItems) {
+                            if (item.textContent && item.textContent.includes(patent)) {
+                                results.found = true;
+                                results.method = 'virtual-scroll-item';
+                                results.element = item;
+                                return results;
+                            }
+                        }
+                        
+                        // OPTIMIZACIÓN 5: Realizar búsqueda de nodos de texto si todo lo demás falla
+                        // Solo buscar en elementos visibles para mayor rendimiento
+                        const visibleElements = Array.from(document.body.querySelectorAll('*'))
+                            .filter(el => {
+                                const rect = el.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0 && 
+                                       rect.top < window.innerHeight && 
+                                       rect.left < window.innerWidth;
+                            });
+                            
+                        for (const el of visibleElements) {
+                            if (el.childNodes && el.childNodes.length) {
+                                for (const node of el.childNodes) {
+                                    if (node.nodeType === 3 && node.textContent && node.textContent.trim() === patent) {
+                                        results.found = true;
+                                        results.method = 'text-node-search';
+                                        results.element = el;
+                                        return results;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Recopilar información sobre la tabla para diagnóstico
+                        const diagnosticInfo = {
+                            visibleRows: document.querySelectorAll('tr:not([style*=""display: none""])').length,
+                            totalRows: document.querySelectorAll('tr').length,
+                            virtualScrollPresent: !!document.querySelector('[class*=""virtual-scroll""]'),
+                            anyPlateElements: !!document.querySelector('[class*=""plate""]'),
+                            bodyScrollHeight: document.body.scrollHeight,
+                            bodyClientHeight: document.body.clientHeight
+                        };
+                        
+                        return { 
+                            found: false, 
+                            reason: 'Placa no encontrada después de búsqueda exhaustiva',
+                            diagnosticInfo: diagnosticInfo
+                        };
                     } catch (error) {
-                        return { found: false, reason: 'Error: ' + error.message };
+                        return { 
+                            found: false, 
+                            reason: 'Error: ' + error.message,
+                            stack: error.stack
+                        };
                     }
                 ", patent);
 
@@ -2598,6 +2749,34 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                                     _logger.Info($"✅ Placa {patent} encontrada y lista (método: {method})", true);
                                     return true;
                                 }
+                                else if (result.ContainsKey("reason"))
+                                {
+                                    var reason = result["reason"].ToString();
+                                    _logger.Debug($"Placa no encontrada: {reason}");
+
+                                    // Si tenemos diagnóstico, logeamos para ayudar en depuración
+                                    if (result.ContainsKey("diagnosticInfo"))
+                                    {
+                                        var info = result["diagnosticInfo"] as Dictionary<string, object>;
+                                        if (info != null)
+                                        {
+                                            _logger.Debug($"Diagnóstico: Filas visibles={info["visibleRows"]}, " +
+                                                         $"Total filas={info["totalRows"]}, " +
+                                                         $"Scroll virtual={info["virtualScrollPresent"]}");
+                                        }
+                                    }
+
+                                    // Si tenemos info de tabla que aún está cargando, esperamos menos tiempo
+                                    if (result.ContainsKey("tableStatus"))
+                                    {
+                                        var tableStatus = result["tableStatus"] as Dictionary<string, object>;
+                                        if (tableStatus != null && Convert.ToBoolean(tableStatus["loading"]))
+                                        {
+                                            await Task.Delay(50); // Espera más corta si aún está cargando
+                                            continue;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2606,10 +2785,16 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                         _logger.Debug($"Error verificando placa específica: {ex.Message}");
                     }
 
-                    await Task.Delay(100); // Verificar cada 100ms
+                    // Intervalo de verificación progresivo (aumenta con el tiempo)
+                    int currentInterval = checkInterval;
+                    if ((DateTime.Now - deadline.AddSeconds(-timeoutSeconds)).TotalSeconds > 2)
+                    {
+                        currentInterval = 200; // Después de 2 segundos, intervalo más largo
+                    }
+                    await Task.Delay(currentInterval);
                 }
 
-                _logger.Debug($"Placa {patent} no encontrada en verificación rápida");
+                _logger.Debug($"Placa {patent} no encontrada en verificación rápida optimizada");
                 return false;
             }
             catch (Exception ex)
