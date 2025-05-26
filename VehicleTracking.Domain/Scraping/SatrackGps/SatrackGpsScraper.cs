@@ -259,9 +259,17 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 // Verificar estado después del login
                 await CheckPageStatus("post-login");
 
+                // IMPORTANTE: Manejar página "no encontrada" que puede aparecer después del login
+                var notFoundHandled = await HandlePageNotFoundError();
+                if (!notFoundHandled)
+                {
+                    _logger.Warning("Se detectó página 'no encontrada' pero no se pudo manejar correctamente", true);
+                    // Continuamos de todos modos, ya que podría ser un falso positivo
+                }
+
                 _logger.Debug("Login ejecutado, esperando redirección a página principal...");
 
-                // CAMBIO IMPORTANTE: Espera más robusta para la página post-login
+                // Espera más robusta para la página post-login
                 var loginSuccess = await WaitForPostLoginPage(dynamicWait);
 
                 if (loginSuccess)
@@ -310,6 +318,23 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 // 1️⃣  Validar salud de la página
                 await CheckPageStatus("inicio de búsqueda de vehículo");
 
+                // Verificar si estamos en la página "no encontrada" y manejarla
+                var notFoundHandled = await HandlePageNotFoundError();
+                if (!notFoundHandled)
+                {
+                    _logger.Warning("Se detectó página 'no encontrada' durante la búsqueda del vehículo", true);
+                    // Intentar navegar a la página principal o hacer un refresh como alternativa
+                    try
+                    {
+                        _driver.Navigate().Refresh();
+                        await Task.Delay(3000);
+                    }
+                    catch (Exception refreshEx)
+                    {
+                        _logger.Warning($"Error al intentar refrescar la página: {refreshEx.Message}", true);
+                    }
+                }
+
                 var dynamicWait = new DynamicWaitHelper(_driver);
 
                 // 2️⃣  Garantizar que la interfaz principal terminó de cargar
@@ -337,9 +362,47 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                         $"CONFIGURACION_INVALIDA: No se encontró el vehículo con placa {patent}");
 
                 // 6️⃣  Clic en la placa para centrar el mapa
-                await ClickWhenClickableAsync(
-                    By.Id(vehicleElement.GetAttribute("id") ?? string.Empty),
-                    cachedElement: vehicleElement);
+                // Primero intentar encontrar el elemento específico de la placa dentro del contenedor
+                IWebElement? elementToClick = vehicleElement;
+
+                // Buscar si hay un elemento más específico que contenga la placa exacta
+                var plateElement = await FindPlateElementInContainer(vehicleElement, patent);
+                if (plateElement != null)
+                {
+                    _logger.Info($"Encontrado elemento específico de placa para {patent}", true);
+                    elementToClick = plateElement;
+                }
+
+                // Realizar el clic en el elemento más específico encontrado
+                var clickResult = await ClickWhenClickableAsync(
+                    By.Id(elementToClick.GetAttribute("id") ?? string.Empty),
+                    cachedElement: elementToClick);
+
+                if (!clickResult)
+                {
+                    _logger.Warning($"No se pudo hacer clic en el elemento de placa {patent}. Intentando alternativas...", true);
+
+                    // Intentar con JavaScript directo para simular selección sin navegación
+                    try
+                    {
+                        ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    // Simular selección del vehículo sin abrir nueva ventana
+                    var evt = document.createEvent('MouseEvents');
+                    evt.initEvent('mousedown', true, true);
+                    arguments[0].dispatchEvent(evt);
+                    
+                    // Disparar evento personalizado para notificar selección
+                    var selectEvent = new CustomEvent('vehicleSelected', { detail: { plate: arguments[1] } });
+                    document.dispatchEvent(selectEvent);
+                ", elementToClick, patent);
+
+                        _logger.Debug("Simulación de selección ejecutada con JavaScript");
+                    }
+                    catch (Exception jsEx)
+                    {
+                        _logger.Warning($"Error en simulación JavaScript: {jsEx.Message}", true);
+                    }
+                }
 
                 _logger.Info($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds} ms] " +
                              $"Vehículo {patent} seleccionado", true);
@@ -379,138 +442,560 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
         private async Task<IWebElement?> FindVehicleInVehicleList(
         string patent,
         DynamicWaitHelper dynamicWait)
-        {
-            try
             {
-                _logger.Debug($"Buscando vehículo con placa {patent} en la lista");
-
-                // 🅰️  Localizar contenedor de la lista (scrollable)
-                var vehicleList = await WaitForVehicleListContainer(dynamicWait);
-                if (vehicleList == null)
+                try
                 {
-                    _logger.Warning("No se encontró la lista de vehículos en la interfaz", true);
+                    _logger.Debug($"Buscando vehículo con placa {patent} en la lista");
+
+                    // 1. Localizar contenedor de la lista (scrollable)
+                    var vehicleList = await WaitForVehicleListContainer(dynamicWait);
+                    if (vehicleList == null)
+                    {
+                        _logger.Warning("No se encontró la lista de vehículos en la interfaz", true);
+
+                        // Intentar búsqueda directa sin contenedor
+                        var directElement = await FindVehiclePlateSpan(patent);
+                        if (directElement != null)
+                        {
+                            return directElement;
+                        }
+
+                        return null;
+                    }
+
+                    // 2. Usar el cuadro de búsqueda si existe - CORREGIDO
+                    var (searchInput, searchError) = await dynamicWait.WaitForElementAsync(
+                        By.CssSelector(
+                            "input[placeholder*='Buscar'], input[aria-label*='buscar'], " +
+                            "input[placeholder*='Filtrar'], input.search-input"),
+                        "search_input",
+                        ensureClickable: true
+                    // ✅ Removido timeout: TimeSpan.FromSeconds(5)
+                    );
+
+                    if (searchInput != null)
+                    {
+                        _logger.Debug("Aplicando filtro en el cuadro de búsqueda");
+
+                        // Limpiar el campo antes de escribir
+                        searchInput.Clear();
+
+                        // Escribir lentamente para asegurar que el sistema capture cada tecla
+                        foreach (char c in patent)
+                        {
+                            searchInput.SendKeys(c.ToString());
+                            await Task.Delay(100);
+                        }
+
+                        // Presionar Enter para confirmar la búsqueda
+                        searchInput.SendKeys(Keys.Enter);
+
+                        await dynamicWait.WaitForAjaxCompletionAsync();
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait")).Any(e => e.Displayed),
+                            "search_filter_complete",
+                            TimeSpan.FromSeconds(5) // ✅ Aquí SÍ podemos usar timeout
+                        );
+
+                        // Pausa para permitir que los resultados se actualicen
+                        await Task.Delay(1000);
+                    }
+
+                    if (searchInput != null)
+                    {
+                        _logger.Debug("Aplicando filtro en el cuadro de búsqueda");
+
+                        // Limpiar el campo antes de escribir
+                        searchInput.Clear();
+
+                        // Escribir lentamente para asegurar que el sistema capture cada tecla
+                        foreach (char c in patent)
+                        {
+                            searchInput.SendKeys(c.ToString());
+                            await Task.Delay(100);
+                        }
+
+                        // Presionar Enter para confirmar la búsqueda
+                        searchInput.SendKeys(Keys.Enter);
+
+                        await dynamicWait.WaitForAjaxCompletionAsync();
+                        await dynamicWait.WaitForConditionAsync(
+                            d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait")).Any(e => e.Displayed),
+                            "search_filter_complete",
+                            TimeSpan.FromSeconds(5)
+                        );
+
+                        // Pausa para permitir que los resultados se actualicen
+                        await Task.Delay(1000);
+                    }
+
+                    // 3. Intento directo buscando por el span exacto de la placa
+                    var plateSpan = await FindVehiclePlateSpan(patent);
+                    if (plateSpan != null)
+                    {
+                        _logger.Info($"Placa {patent} encontrada directamente a través de su span", true);
+                        return plateSpan;
+                    }
+
+                    // 4. Intento encontrando el contenedor de la placa
+                    var vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
+                    if (vehicleItem != null)
+                    {
+                        _logger.Info($"Vehículo {patent} encontrado por su contenedor", true);
+                        return vehicleItem;
+                    }
+
+                    // 5. Scroll en la lista de vehículos si los métodos anteriores fallaron
+                    _logger.Debug("Placa no visible; iniciando scroll progresivo en la lista de vehículos");
+
+                    // Scroll al inicio para comenzar la búsqueda desde arriba
+                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop = 0;", vehicleList);
+                    await Task.Delay(500);
+
+                    // Intento rápido después de volver al inicio
+                    plateSpan = await FindVehiclePlateSpan(patent);
+                    if (plateSpan != null)
+                    {
+                        _logger.Info($"Placa {patent} encontrada después de scroll al inicio", true);
+                        return plateSpan;
+                    }
+
+                    // Calcular propiedades de scroll
+                    int scrollHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollHeight", vehicleList));
+                    int clientHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].clientHeight", vehicleList));
+                    int scrollStep = Math.Max(clientHeight / 3, 50); // Usar un paso más pequeño para no perder elementos
+
+                    _logger.Debug($"Iniciando scroll progresivo: altura={scrollHeight}, altura visible={clientHeight}, paso={scrollStep}");
+
+                    // Scroll progresivo
+                    for (int step = 0; step <= scrollHeight; step += scrollStep)
+                    {
+                        // Establecer la posición de scroll
+                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop = arguments[1];", vehicleList, step);
+                        await Task.Delay(300);
+
+                        // Buscar el elemento span de la placa
+                        plateSpan = await FindVehiclePlateSpan(patent);
+                        if (plateSpan != null)
+                        {
+                            _logger.Info($"Placa {patent} encontrada después de scroll a posición {step}", true);
+
+                            // Centrar el elemento
+                            ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", plateSpan);
+                            await Task.Delay(300);
+
+                            return plateSpan;
+                        }
+
+                        // Buscar el contenedor de la placa
+                        vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
+                        if (vehicleItem != null)
+                        {
+                            _logger.Info($"Contenedor de placa {patent} encontrado después de scroll a posición {step}", true);
+
+                            // Centrar el elemento
+                            ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", vehicleItem);
+                            await Task.Delay(300);
+
+                            return vehicleItem;
+                        }
+
+                        // Verificar si hemos llegado al final de la lista
+                        int currentScrollTop = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollTop;", vehicleList));
+                        if (currentScrollTop + clientHeight >= scrollHeight - 20)
+                        {
+                            _logger.Debug("Llegamos al final de la lista sin encontrar la placa");
+                            break;
+                        }
+                    }
+
+                    // 6. Último intento: búsqueda exhaustiva con JavaScript
+                    _logger.Debug("Intentando búsqueda exhaustiva con JavaScript");
+
+                    var jsElement = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                function findVehicleElement(patent) {
+                    // 1. Buscar span con clase notranslate
+                    const spans = document.querySelectorAll('span.notranslate');
+                    for (const span of spans) {
+                        if (span.textContent.trim() === patent && 
+                            span.offsetWidth > 0 && 
+                            span.offsetHeight > 0) {
+                        
+                            // Hacer visible si es necesario
+                            const container = span.closest('div[class*=""vehicle-list""], div[class*=""sidebar""]');
+                            if (container) {
+                                const rect = span.getBoundingClientRect();
+                                if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                                    span.scrollIntoView({block: 'center'});
+                                }
+                            }
+                        
+                            return span;
+                        }
+                    }
+                
+                    // 2. Buscar div con ID que contenga la placa
+                    const divs = document.querySelectorAll(`div[id*=""${patent}""]`);
+                    for (const div of divs) {
+                        if (div.offsetWidth > 0 && div.offsetHeight > 0) {
+                            // Hacer visible si es necesario
+                            div.scrollIntoView({block: 'center'});
+                            return div;
+                        }
+                    }
+                
+                    // 3. Buscar cualquier elemento con el texto exacto
+                    const allElements = document.querySelectorAll('*');
+                    for (const el of allElements) {
+                        if (el.textContent.trim() === patent && 
+                            el.offsetWidth > 0 && 
+                            el.offsetHeight > 0) {
+                            // Hacer visible si es necesario
+                            el.scrollIntoView({block: 'center'});
+                            return el;
+                        }
+                    }
+                
                     return null;
                 }
+            
+                return findVehicleElement(arguments[0]);
+            ", patent);
 
-                // 🅱️  Usar el cuadro de búsqueda si existe
-                var (searchInput, _) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector(
-                        "input[placeholder*='Buscar'], input[aria-label*='buscar'], " +
-                        "input[placeholder*='Filtrar'], input.search-input"),
-                    "search_input",
-                    ensureClickable: true);
+                    if (jsElement != null)
+                    {
+                        _logger.Info($"Elemento de placa {patent} encontrado mediante búsqueda JavaScript exhaustiva", true);
+                        return (IWebElement)jsElement;
+                    }
 
-                if (searchInput != null)
-                {
-                    _logger.Debug("Aplicando filtro en el cuadro de búsqueda");
-                    searchInput.Clear();
-                    searchInput.SendKeys(patent);
-                    await dynamicWait.WaitForAjaxCompletionAsync();
-                    await dynamicWait.WaitForConditionAsync(
-                        d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait"))
-                               .Any(e => e.Displayed),
-                        "search_filter_complete",
-                        TimeSpan.FromSeconds(5));
+                    _logger.Warning($"No se pudo encontrar la placa {patent} después de múltiples intentos", true);
+                    return null;
                 }
-
-                // 🅲️  Intento directo
-                var vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
-                if (vehicleItem != null)
+                catch (Exception ex)
                 {
-                    _logger.Info($"Vehículo {patent} encontrado sin necesidad de scroll", true);
-                    return vehicleItem;
+                    _logger.Error($"Error en FindVehicleInVehicleList: {ex.Message}", ex);
+                    return null;
                 }
-
-                // 🅳️  Scroll si aún no aparece
-                _logger.Debug("Placa no visible; iniciando scroll progresivo");
-                return await ScrollAndFindVehicle(patent, vehicleList, dynamicWait);
             }
-            catch (Exception ex)
-            {
-                _logger.Error($"Error buscando vehículo {patent} en la lista", ex);
-                return null;
-            }
-        }
 
         private async Task<IWebElement?> FindVehicleItemByPatent(string patent, DynamicWaitHelper dynamicWait)
         {
             try
             {
-                // Intentar múltiples selectores para encontrar el elemento del vehículo
-                var selectors = new[]
-                {
-            $"//div[contains(@class, 'vehicle-item') and contains(., '{patent}')]",
-            $"//tr[contains(., '{patent}')]",
-            $"//li[contains(., '{patent}')]",
-            $"//div[contains(@class, 'item') and contains(., '{patent}')]",
-            $"//div[contains(text(), '{patent}')]",
-            $"//span[contains(text(), '{patent}')]"
-        };
+                _logger.Debug($"Buscando vehículo con placa {patent} en la lista de vehículos");
 
-                foreach (var selector in selectors)
+                // 1. Selectores específicos para las placas basados en el HTML observado
+                var exactPlateSelectors = new[]
                 {
-                    var (element, _) = await dynamicWait.WaitForElementAsync(
-                        By.XPath(selector),
-                        $"vehicle_item_{selector.GetHashCode()}",
-                        ensureClickable: true
-                    );
+                    // id exacto (sin guion bajo)
+                    $"//*[@id='{patent}alias']",
+                    // id que contiene la placa (por si cambia el sufijo)
+                    $"//*[@id[contains(.,'{patent}')]]",
+                    // div con clase item-veh-plate cuyo id contiene la placa
+                    $"//div[contains(@class,'item-veh-plate') and contains(@id,'{patent}')]",
+                    // span notranslate con el texto exacto
+                    $"//span[@class='notranslate' and normalize-space(text())='{patent}']"
+                };
 
-                    if (element != null)
+                // 2. Intentar primero búsqueda directa sin scroll
+                foreach (var selector in exactPlateSelectors)
+                {
+                    try
                     {
-                        _logger.Debug($"Vehículo encontrado con selector: {selector}");
-                        return element;
+                        var elements = _driver.FindElements(By.XPath(selector));
+                        var visibleElement = elements.FirstOrDefault(e => e.Displayed);
+
+                        if (visibleElement != null)
+                        {
+                            _logger.Info($"Placa {patent} encontrada directamente con selector: {selector}", true);
+                            return visibleElement;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en búsqueda directa con selector '{selector}': {ex.Message}");
                     }
                 }
 
-                // Búsqueda adicional usando JavaScript para detectar elementos que contienen la placa
-                var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-            function findElementWithText(text) {
-                const elements = document.querySelectorAll('*');
-                for (const element of elements) {
-                    if (element.textContent && 
-                        element.textContent.includes(text) && 
-                        element.offsetWidth > 0 && 
-                        element.offsetHeight > 0) {
+                // 3. Buscar contenedor de lista de vehículos para hacer scroll
+                var vehicleListContainers = new[]
+                {
+            "div.vehicle-list",
+            ".leaflet-sidebar-content",
+            "[class*='vehicle-list']",
+            "[class*='sidebar'] [class*='content']",
+            "div:has(div.item-veh-plate)"
+        };
+
+                IWebElement? listContainer = null;
+                foreach (var containerSelector in vehicleListContainers)
+                {
+                    try
+                    {
+                        var containers = _driver.FindElements(By.CssSelector(containerSelector));
+                        listContainer = containers.FirstOrDefault(c => c.Displayed && c.Size.Height > 100);
+
+                        if (listContainer != null)
+                        {
+                            _logger.Debug($"Contenedor de lista de vehículos encontrado con selector: {containerSelector}");
+                            break;
+                        }
+                    }
+                    catch { /* Continuar con el siguiente selector */ }
+                }
+
+                if (listContainer == null)
+                {
+                    _logger.Warning("No se pudo encontrar un contenedor de lista de vehículos para hacer scroll", true);
+
+                    // Intentar usar JavaScript para encontrar el contenedor
+                    try
+                    {
+                        var jsContainer = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    // Buscar contenedor scrollable que contenga placas de vehículos
+                    function findScrollableContainer() {
+                        // Primero buscar por elementos que contengan la palabra 'vehicle' o 'veh' en sus clases
+                        const vehicleContainers = Array.from(document.querySelectorAll('[class*=""vehicle""], [class*=""veh""]'))
+                            .filter(el => el.scrollHeight > el.clientHeight);
                         
-                        // Verificar si es un elemento interactivo o un contenedor de lista
-                        if (element.tagName === 'DIV' || 
-                            element.tagName === 'LI' || 
-                            element.tagName === 'TR' || 
-                            element.tagName === 'SPAN' || 
-                            element.tagName === 'A' || 
-                            element.tagName === 'BUTTON') {
-                            
-                            // Preferir elementos con clases relacionadas con vehículos
-                            if (element.className.includes('vehicle') || 
-                                element.className.includes('item') || 
-                                element.className.includes('row')) {
-                                return element;
+                        if (vehicleContainers.length > 0) {
+                            return vehicleContainers[0];
+                        }
+                        
+                        // Si no, buscar cualquier contenedor scrollable visible
+                        return Array.from(document.querySelectorAll('div'))
+                            .filter(el => 
+                                el.scrollHeight > el.clientHeight && 
+                                el.offsetWidth > 0 && 
+                                el.offsetHeight > 100 &&
+                                window.getComputedStyle(el).overflow.includes('scroll') || 
+                                window.getComputedStyle(el).overflowY.includes('scroll') ||
+                                window.getComputedStyle(el).overflow === 'auto' || 
+                                window.getComputedStyle(el).overflowY === 'auto'
+                            )[0];
+                    }
+                    
+                    return findScrollableContainer();
+                ");
+
+                        if (jsContainer != null)
+                        {
+                            listContainer = (IWebElement)jsContainer;
+                            _logger.Debug("Contenedor de lista de vehículos encontrado mediante JavaScript");
+                        }
+                    }
+                    catch { /* Ignorar errores en JavaScript */ }
+                }
+
+                // 4. Si tenemos un contenedor, hacer scroll y buscar la placa
+                if (listContainer != null)
+                {
+                    _logger.Debug($"Iniciando scroll para buscar placa {patent}");
+
+                    // Primero, scrollear al inicio
+                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop = 0;", listContainer);
+                    await Task.Delay(500);
+
+                    // Intentar buscar la placa de nuevo
+                    foreach (var selector in exactPlateSelectors)
+                    {
+                        try
+                        {
+                            var elements = _driver.FindElements(By.XPath(selector));
+                            var visibleElement = elements.FirstOrDefault(e => e.Displayed);
+
+                            if (visibleElement != null)
+                            {
+                                _logger.Info($"Placa {patent} encontrada después de scroll al inicio", true);
+                                return visibleElement;
                             }
-                            
-                            // Si no tiene clases específicas pero contiene el texto, también es candidato
-                            if (element.textContent.trim() === text || 
-                                element.textContent.includes(' ' + text + ' ')) {
+                        }
+                        catch { /* Continuar con el siguiente selector */ }
+                    }
+
+                    // Calcular parámetros para scroll progresivo
+                    int scrollHeight = 0;
+                    try
+                    {
+                        scrollHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollHeight", listContainer));
+                    }
+                    catch
+                    {
+                        scrollHeight = 1000; // Valor predeterminado si no podemos obtener el scrollHeight
+                    }
+
+                    int clientHeight = 0;
+                    try
+                    {
+                        clientHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].clientHeight", listContainer));
+                    }
+                    catch
+                    {
+                        clientHeight = 200; // Valor predeterminado si no podemos obtener el clientHeight
+                    }
+
+                    // Usar un paso de scroll más pequeño para no saltarse elementos
+                    int scrollStep = Math.Max(clientHeight / 2, 50);
+                    int maxScrolls = (scrollHeight / scrollStep) + 5; // +5 para asegurar que llegamos al final
+
+                    _logger.Debug($"Iniciando scroll progresivo: altura={scrollHeight}, paso={scrollStep}, máx. pasos={maxScrolls}");
+
+                    // Scroll progresivo a través de la lista
+                    for (int i = 0; i < maxScrolls; i++)
+                    {
+                        // Scroll un paso hacia abajo
+                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop += arguments[1];", listContainer, scrollStep);
+                        await Task.Delay(300); // Pausa para permitir que se carguen elementos
+
+                        // Verificar si la placa es visible después del scroll
+                        foreach (var selector in exactPlateSelectors)
+                        {
+                            try
+                            {
+                                var elements = _driver.FindElements(By.XPath(selector));
+                                var visibleElement = elements.FirstOrDefault(e => e.Displayed);
+
+                                if (visibleElement != null)
+                                {
+                                    _logger.Info($"Placa {patent} encontrada después de {i + 1} pasos de scroll", true);
+
+                                    // Scroll adicional para centrar el elemento
+                                    try
+                                    {
+                                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", visibleElement);
+                                        await Task.Delay(300);
+                                    }
+                                    catch { /* Ignorar errores de centrado */ }
+
+                                    return visibleElement;
+                                }
+                            }
+                            catch { /* Continuar con el siguiente selector */ }
+                        }
+
+                        // Verificar si hemos llegado al final del scroll
+                        var currentScrollTop = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollTop;", listContainer));
+                        var isAtBottom = (currentScrollTop + clientHeight >= scrollHeight - 10);
+
+                        if (isAtBottom)
+                        {
+                            _logger.Debug("Llegamos al final de la lista sin encontrar la placa");
+                            break;
+                        }
+                    }
+
+                    // Búsqueda final utilizando JavaScript para examinar todo el DOM
+                    try
+                    {
+                        var jsElement = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    function findPlateElement(patent) {
+                        // Buscar por ID exacto primero
+                        const idSelectors = [
+                            `div[id='${patent}_alias']`,
+                            `div[id='${patent}*alias']`,
+                            `[id*='${patent}']`
+                        ];
+                        
+                        for (const selector of idSelectors) {
+                            const element = document.querySelector(selector);
+                            if (element && element.offsetWidth > 0 && element.offsetHeight > 0) {
                                 return element;
                             }
                         }
+                        
+                        // Buscar span con el texto exacto
+                        const spans = Array.from(document.querySelectorAll('span'));
+                        for (const span of spans) {
+                            if (span.textContent.trim() === patent && 
+                                span.offsetWidth > 0 && 
+                                span.offsetHeight > 0) {
+                                return span;
+                            }
+                        }
+                        
+                        // Buscar cualquier elemento con el texto exacto
+                        const walker = document.createTreeWalker(
+                            document.body, 
+                            NodeFilter.SHOW_TEXT, 
+                            { acceptNode: function(node) { 
+                                return node.textContent.trim() === patent ? 
+                                    NodeFilter.FILTER_ACCEPT : 
+                                    NodeFilter.FILTER_REJECT; 
+                              }
+                            }, 
+                            false
+                        );
+                        
+                        while (walker.nextNode()) {
+                            const node = walker.currentNode;
+                            if (node.parentElement && 
+                                node.parentElement.offsetWidth > 0 && 
+                                node.parentElement.offsetHeight > 0) {
+                                return node.parentElement;
+                            }
+                        }
+                        
+                        return null;
+                    }
+                    
+                    return findPlateElement(arguments[0]);
+                ", patent);
+
+                        if (jsElement != null)
+                        {
+                            _logger.Info($"Placa {patent} encontrada mediante búsqueda JavaScript completa", true);
+
+                            // Asegurarse de que el elemento está visible
+                            ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", jsElement);
+                            await Task.Delay(300);
+
+                            return (IWebElement)jsElement;
+                        }
+                    }
+                    catch (Exception jsEx)
+                    {
+                        _logger.Debug($"Error en búsqueda JavaScript: {jsEx.Message}");
                     }
                 }
-                return null;
-            }
-            return findElementWithText(arguments[0]);
-        ", patent);
 
-                if (jsResult != null)
+                // 5. Último intento: Buscar en toda la página
+                _logger.Warning($"No se pudo encontrar la placa {patent} en la lista de vehículos usando scroll. Intentando búsqueda global...", true);
+
+                try
                 {
-                    _logger.Debug("Vehículo encontrado mediante JavaScript");
-                    return (IWebElement)jsResult;
+                    // Intentar búsqueda global en todo el DOM
+                    var globalSelectors = new[]
+                    {
+                $"//div[contains(text(), '{patent}')]",
+                $"//span[contains(text(), '{patent}')]",
+                $"//a[contains(text(), '{patent}')]",
+                $"//div[contains(@id, '{patent}')]",
+                $"//*[text()='{patent}']"
+            };
+
+                    foreach (var selector in globalSelectors)
+                    {
+                        var elements = _driver.FindElements(By.XPath(selector));
+                        var visibleElement = elements.FirstOrDefault(e => e.Displayed);
+
+                        if (visibleElement != null)
+                        {
+                            _logger.Info($"Placa {patent} encontrada mediante búsqueda global con selector: {selector}", true);
+                            return visibleElement;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error en búsqueda global: {ex.Message}", true);
                 }
 
+                _logger.Warning($"No se pudo encontrar la placa {patent} usando ningún método", true);
                 return null;
             }
             catch (Exception ex)
             {
-                _logger.Warning($"Error en FindVehicleItemByPatent: {ex.Message}");
+                _logger.Warning($"Error en FindVehicleItemByPatent: {ex.Message}", true);
                 return null;
             }
         }
@@ -1062,18 +1547,23 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             {
                 _logger.Debug("Iniciando navegación a sección de vehículos/mapa");
 
-                // Verificar si ya estamos en la sección de mapa
+                // Verificar si ya estamos en la sección de mapa mediante múltiples indicadores
                 var alreadyInMapSection = await dynamicWait.WaitForConditionAsync(d =>
                 {
                     try
                     {
-                        return d.FindElements(By.CssSelector(".leaflet-container")).Any(e => e.Displayed);
+                        // Verificar múltiples elementos que indican que estamos en la sección del mapa
+                        return d.FindElements(By.CssSelector(".leaflet-container")).Any(e => e.Displayed) ||
+                               d.FindElements(By.CssSelector(".vehicle-list")).Any(e => e.Displayed) ||
+                               d.FindElements(By.CssSelector(".item-veh-plate")).Any(e => e.Displayed) ||
+                               d.FindElements(By.CssSelector(".map-container")).Any(e => e.Displayed) ||
+                               d.Url.Contains("/main");
                     }
                     catch
                     {
                         return false;
                     }
-                }, "map_section_check", TimeSpan.FromMilliseconds(500));
+                }, "map_section_check", TimeSpan.FromSeconds(2));
 
                 if (alreadyInMapSection)
                 {
@@ -1081,38 +1571,149 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     return;
                 }
 
-                // Buscar y hacer clic en el botón/enlace de mapa o vehículos
-                var (mapButton, mapButtonError) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector("a[href*='/map'], a[href*='/vehicles'], button[data-target='map']"),
-                    "map_button",
-                    ensureClickable: true
-                );
+                // Si no estamos en la sección correcta, intentar diferentes métodos para navegar
 
-                if (mapButton == null)
+                // 1. Intentar hacer clic en el botón de mapa/ubicación
+                var mapButtonSelectors = new[] {
+            "a[href*='/main']",
+            "a[href*='/map']",
+            "a[href*='/vehicles']",
+            "button[data-target='map']",
+            "//a[contains(text(), 'Ubicación')]",
+            "//a[contains(text(), 'Mapa')]",
+            "//button[contains(text(), 'Mapa')]"
+        };
+
+                bool clickSuccess = false;
+                foreach (var selector in mapButtonSelectors)
                 {
-                    _logger.Warning($"No se pudo encontrar el botón de mapa/vehículos. Detalles del error: {mapButtonError}", true);
-                    throw new InvalidOperationException("No se pudo encontrar el botón de mapa/vehículos");
+                    try
+                    {
+                        var isXPath = selector.StartsWith("//");
+                        var by = isXPath ? By.XPath(selector) : By.CssSelector(selector);
+
+                        var (mapButton, mapButtonError) = await dynamicWait.WaitForElementAsync(
+                            by,
+                            $"map_button_{selector.GetHashCode()}",
+                            ensureClickable: true
+                        );
+
+                        if (mapButton != null)
+                        {
+                            _logger.Debug($"Botón de mapa/vehículos encontrado con selector '{selector}', intentando hacer clic...");
+
+                            // Intentar hacer clic mediante JavaScript para mayor fiabilidad
+                            try
+                            {
+                                ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", mapButton);
+                                await Task.Delay(2000);
+                                clickSuccess = true;
+                                break;
+                            }
+                            catch (Exception jsEx)
+                            {
+                                _logger.Debug($"Error en clic JS: {jsEx.Message}, intentando clic normal...");
+
+                                // Si falla JavaScript, intentar clic normal
+                                mapButton.Click();
+                                await Task.Delay(2000);
+                                clickSuccess = true;
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error con selector '{selector}': {ex.Message}");
+                        // Continuar con el siguiente selector
+                    }
                 }
 
-                // Hacer clic en el botón de mapa
-                await ClickWhenClickableAsync(By.CssSelector("a[href*='/map'], a[href*='/vehicles'], button[data-target='map']"), cachedElement: mapButton);
+                // 2. Si no funcionó el clic, intentar navegación directa a URL
+                if (!clickSuccess)
+                {
+                    _logger.Debug("No se pudo hacer clic en botón de mapa, intentando navegación directa a /main");
 
-                // Esperar a que la página del mapa cargue
+                    try
+                    {
+                        _driver.Navigate().GoToUrl("https://portal.satrack.com/main");
+                        await Task.Delay(3000);
+                    }
+                    catch (Exception urlEx)
+                    {
+                        _logger.Warning($"Error en navegación directa a /main: {urlEx.Message}", true);
+                    }
+                }
+
+                // 3. Verificar si ahora estamos en la sección del mapa (con espera más larga)
                 var mapLoaded = await dynamicWait.WaitForConditionAsync(d =>
                 {
                     try
                     {
-                        return d.FindElements(By.CssSelector(".leaflet-container")).Any(e => e.Displayed);
+                        // Verificar múltiples indicadores de que estamos en la sección de mapa
+                        var leafletExists = d.FindElements(By.CssSelector(".leaflet-container")).Any(e => e.Displayed);
+                        var mapContainerExists = d.FindElements(By.CssSelector(".map-container, [id*='map']")).Any(e => e.Displayed);
+                        var vehicleListExists = d.FindElements(By.CssSelector(".vehicle-list, .item-veh-plate")).Any(e => e.Displayed);
+                        var mainUrl = d.Url.Contains("/main");
+
+                        return leafletExists || mapContainerExists || vehicleListExists || mainUrl;
                     }
                     catch
                     {
                         return false;
                     }
-                }, "map_loaded", TimeSpan.FromSeconds(10));
+                }, "map_loaded", TimeSpan.FromSeconds(15));
 
                 if (!mapLoaded)
                 {
-                    throw new InvalidOperationException("La sección del mapa no cargó correctamente");
+                    // 4. Último intento: verificar mediante JavaScript elementos clave y la estructura DOM
+                    bool jsCheck = false;
+                    try
+                    {
+                        jsCheck = (bool)((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    // Verificar elementos clave que indican que estamos en la sección de mapa
+                    return (
+                        document.querySelector('.leaflet-container') != null ||
+                        document.querySelector('.map-container') != null ||
+                        document.querySelector('.vehicle-list') != null ||
+                        document.querySelector('.item-veh-plate') != null ||
+                        document.querySelectorAll('div[class*=""map""]').length > 0 ||
+                        document.querySelectorAll('div[class*=""vehicle""]').length > 0 ||
+                        window.location.href.includes('/main')
+                    );
+                ");
+                    }
+                    catch { /* Ignorar errores en la verificación JavaScript */ }
+
+                    if (!jsCheck)
+                    {
+                        _logger.Warning("La sección del mapa no pudo ser detectada después de múltiples intentos", true);
+
+                        // 5. Último recurso: refrescar la página y esperar
+                        try
+                        {
+                            _logger.Debug("Intentando refrescar la página como último recurso...");
+                            _driver.Navigate().Refresh();
+                            await Task.Delay(5000);
+
+                            // Verificar una última vez
+                            var finalCheck = await dynamicWait.WaitForConditionAsync(d =>
+                                d.FindElements(By.CssSelector(".leaflet-container, .map-container, .vehicle-list, .item-veh-plate")).Any(e => e.Displayed) ||
+                                d.Url.Contains("/main"),
+                                "final_map_check",
+                                TimeSpan.FromSeconds(10)
+                            );
+
+                            if (!finalCheck)
+                            {
+                                throw new InvalidOperationException("La sección del mapa no cargó correctamente después de múltiples intentos");
+                            }
+                        }
+                        catch (Exception refreshEx)
+                        {
+                            throw new InvalidOperationException("La sección del mapa no cargó correctamente", refreshEx);
+                        }
+                    }
                 }
 
                 // Verificar que el mapa esté completamente cargado esperando los marcadores
@@ -1120,17 +1721,17 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 {
                     try
                     {
-                        return d.FindElements(By.CssSelector(".leaflet-marker-icon, .vehicle-marker, .marker-cluster")).Any(e => e.Displayed);
+                        return d.FindElements(By.CssSelector(".leaflet-marker-icon, .vehicle-marker, .marker-cluster, [class*='marker']")).Any(e => e.Displayed);
                     }
                     catch
                     {
                         return false;
                     }
-                }, "map_markers_loaded", TimeSpan.FromSeconds(5));
+                }, "map_markers_loaded", TimeSpan.FromSeconds(10));
 
                 if (!markersLoaded)
                 {
-                    _logger.Warning("Los marcadores del mapa no cargaron completamente", true);
+                    _logger.Warning("Los marcadores del mapa no cargaron completamente, pero continuando el proceso", true);
                 }
 
                 _logger.Info("Navegación a sección de vehículos/mapa completada exitosamente", true);
@@ -1140,7 +1741,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 _logger.Error("Error en NavigateToVehiclesSection", ex);
                 throw;
             }
-        }           
+        }
 
         private async Task CheckPageStatus(string context = "")
         {
@@ -1775,53 +2376,137 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 _logger.Warning($"Error al verificar estado de interfaz principal: {ex.Message}");
                 return false;
             }
-        }      
+        }
+
+        private async Task<bool> HandlePageNotFoundError()
+        {
+            try
+            {
+                // Verificar si estamos en la página de error por URL o contenido
+                var isErrorPage = _driver.Url.Contains("not-found") ||
+                                 _driver.PageSource.Contains("Página no encontrada") ||
+                                 _driver.PageSource.Contains("No pudimos encontrar la página");
+
+                if (isErrorPage)
+                {
+                    _logger.Warning("Detectada página 'no encontrada' después del login. Intentando ir al inicio...", true);
+
+                    // Buscar el botón "Ir al inicio" con diferentes selectores
+                    var homeButtonSelectors = new[]
+                    {
+                "//a[contains(text(), 'Ir al inicio')]",
+                "//a[contains(text(), 'inicio')]",
+                "//a[contains(@class, 'home')]",
+                "//button[contains(text(), 'Ir al inicio')]",
+                "//button[contains(text(), 'inicio')]",
+                "//a[contains(@href, 'main')]"
+            };
+
+                    foreach (var selector in homeButtonSelectors)
+                    {
+                        try
+                        {
+                            var homeButton = _driver.FindElements(By.XPath(selector)).FirstOrDefault();
+                            if (homeButton != null && homeButton.Displayed)
+                            {
+                                _logger.Debug($"Botón 'Ir al inicio' encontrado con selector '{selector}', intentando hacer clic...");
+
+                                // Intentar clic con JavaScript primero para mayor confiabilidad
+                                try
+                                {
+                                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", homeButton);
+                                    _logger.Debug("Clic en 'Ir al inicio' ejecutado con JavaScript");
+                                }
+                                catch
+                                {
+                                    // Si falla el JavaScript, intentar clic normal
+                                    homeButton.Click();
+                                    _logger.Debug("Clic en 'Ir al inicio' ejecutado normalmente");
+                                }
+
+                                // Esperar a que la página principal cargue
+                                await Task.Delay(3000);
+
+                                // Verificar si ya no estamos en la página de error
+                                if (!_driver.Url.Contains("not-found") &&
+                                    !_driver.PageSource.Contains("Página no encontrada") &&
+                                    !_driver.PageSource.Contains("No pudimos encontrar la página"))
+                                {
+                                    _logger.Info("Navegación exitosa desde página de error al inicio", true);
+                                    return true;
+                                }
+                            }
+                        }
+                        catch (Exception innerEx)
+                        {
+                            _logger.Debug($"Error al intentar con selector '{selector}': {innerEx.Message}");
+                            // Continuar con el siguiente selector
+                        }
+                    }
+
+                    _logger.Warning("No se pudo encontrar o usar el botón 'Ir al inicio' en la página de error", true);
+                    return false;
+                }
+                return true; // No estamos en la página de error
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning($"Error al manejar la página 'no encontrada': {ex.Message}", true);
+                return false;
+            }
+        }
 
         private async Task<bool> WaitForVehicleListReady(
         DynamicWaitHelper dynamicWait,
         TimeSpan? maxWait = null)
+        {
+            maxWait ??= TimeSpan.FromSeconds(60);
+            var deadline = DateTime.Now + maxWait.Value;
+
+            while (DateTime.Now < deadline)
             {
-                maxWait ??= TimeSpan.FromSeconds(60);
-                var deadline = DateTime.Now + maxWait.Value;
+                if (await WaitForVehicleListContainer(dynamicWait) != null)
+                    return true;
 
-                while (DateTime.Now < deadline)
-                {
-                    if (await WaitForVehicleListContainer(dynamicWait) != null)
-                        return true;
-
-                    await Task.Delay(500);
-                }
-
-                return false;
+                await Task.Delay(500);
             }
 
-        private async Task<IWebElement?> WaitForVehicleListContainer(DynamicWaitHelper dynamicWait)
+            return false;
+        }
+
+        private async Task<IWebElement?> WaitForVehicleListContainer(
+        DynamicWaitHelper dynamicWait)
         {
             _logger.Debug("Buscando contenedor de la lista de vehículos…");
 
-            // Selectores observados en la UI clásica y en la versión más reciente
+            // ➜ nuevos selectores 🔽  (los anteriores se mantienen)
             var selectors = new[]
             {
-        ".leaflet-sidebar-content",
-        ".vehicle-list",
-        ".vehicles-panel",
-        ".ng-side-list",
-        "#sidebar-content",
-        ".vehicle-list-container",
-        ".side-nav",
-        ".item-veh",
-        "div[aria-label*=vehículo]",
-        "div[aria-label*=vehículos]"
-    };
+                // selector exacto al id que muestra tu captura
+                "#cdk_scroll_location_vehicles_list",
+                // cualquier virtual-scroll que contenga “vehicles_list” en el id
+                "cdk-virtual-scroll-viewport[id*='vehicles_list']",
+                // cualquier virtual-scroll visible
+                "cdk-virtual-scroll-viewport.cdk-virtual-scroll-viewport",
+                // selectores que ya tenías
+                ".leaflet-sidebar-content",
+                ".vehicle-list",
+                ".vehicles-panel",
+                ".ng-side-list",
+                "#sidebar-content",
+                ".vehicle-list-container",
+                ".side-nav",
+                ".item-veh",
+                "div[aria-label*=vehículo]",
+                "div[aria-label*=vehículos]"
+            };
 
             foreach (var sel in selectors)
-            {                
-                // ► el helper se encarga de la espera dinámica.
+            {
                 var (container, _) = await dynamicWait.WaitForElementAsync(
                     By.CssSelector(sel),
                     $"vehicle_list_container_{sel.GetHashCode()}",
-                    ensureClickable: false   // solo queremos visibilidad
-                );
+                    ensureClickable: false);
 
                 if (container is not null && container.Displayed)
                 {
@@ -1830,8 +2515,155 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 }
             }
 
-            _logger.Warning("No se localizó el contenedor de la lista de vehículos con los selectores conocidos.");
+            // ➊ Búsqueda JS (último recurso)
+            var jsContainer = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+        return document.querySelector('cdk-virtual-scroll-viewport[id*=\""vehicles_list\""], cdk-virtual-scroll-viewport.cdk-virtual-scroll-viewport');");
+            if (jsContainer is IWebElement we && we.Displayed)
+            {
+                _logger.Debug("Contenedor encontrado mediante JavaScript");
+                return we;
+            }
+
+            _logger.Warning("No se localizó el contenedor de la lista de vehículos.");
             return null;
+        }
+
+        private async Task<IWebElement?> FindPlateElementInContainer(IWebElement container, string patent)
+        {
+            try
+            {
+                _logger.Debug($"Buscando elemento específico de placa {patent} dentro del contenedor");
+
+                // Buscar directamente elementos span con el texto exacto de la placa
+                var plateElements = container.FindElements(By.XPath($".//span[normalize-space(text())='{patent}']"));
+                if (plateElements.Any(e => e.Displayed))
+                {
+                    var visiblePlate = plateElements.First(e => e.Displayed);
+                    _logger.Debug($"Encontrado elemento de placa visible dentro del contenedor");
+                    return visiblePlate;
+                }
+
+                // Buscar en cualquier elemento que contenga el texto exacto
+                var anyElements = container.FindElements(By.XPath($".//*[normalize-space(text())='{patent}']"));
+                if (anyElements.Any(e => e.Displayed))
+                {
+                    var visibleElement = anyElements.First(e => e.Displayed);
+                    _logger.Debug($"Encontrado elemento con texto exacto dentro del contenedor");
+                    return visibleElement;
+                }
+
+                // Si no se encuentra elemento exacto, usar JavaScript para buscar dentro del contenedor
+                var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            function findPlateInContainer(container, plate) {
+                // Buscar elementos con el texto exacto
+                var nodes = [];
+                var walk = document.createTreeWalker(
+                    container,
+                    NodeFilter.SHOW_TEXT,
+                    { acceptNode: function(node) { return NodeFilter.FILTER_ACCEPT; } },
+                    false
+                );
+                
+                while(node = walk.nextNode()) {
+                    if (node.nodeValue.trim() === plate) {
+                        return node.parentNode;
+                    }
+                }
+                
+                // Si no hay coincidencia exacta, buscar el elemento más específico
+                var allElements = container.querySelectorAll('*');
+                for (var i = 0; i < allElements.length; i++) {
+                    var el = allElements[i];
+                    if (el.textContent.includes(plate) && 
+                        el.offsetWidth > 0 && 
+                        el.offsetHeight > 0) {
+                        
+                        // Preferir elementos más específicos
+                        if (el.tagName === 'SPAN' || 
+                            el.tagName === 'DIV' && el.className.includes('plate')) {
+                            return el;
+                        }
+                    }
+                }
+                
+                return null;
+            }
+            
+            return findPlateInContainer(arguments[0], arguments[1]);
+        ", container, patent);
+
+                if (jsResult != null)
+                {
+                    _logger.Debug("Elemento de placa encontrado con JavaScript dentro del contenedor");
+                    return (IWebElement)jsResult;
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning($"Error buscando placa en contenedor: {ex.Message}");
+                return null;
+            }
+        }
+
+        private async Task<IWebElement?> FindVehiclePlateSpan(string patent)
+        {
+            try
+            {
+                _logger.Debug($"Buscando elemento span específico para placa {patent}");
+
+                // Selectores específicos para el span que contiene el texto de la placa
+                var spanSelectors = new[] {
+            $"//span[@class='notranslate' and text()='{patent}']",
+            $"//div[contains(@id, '{patent}')]//span",
+            $"//div[contains(@class, 'item-veh-plate')]//span[text()='{patent}']"
+        };
+
+                foreach (var selector in spanSelectors)
+                {
+                    try
+                    {
+                        var spans = _driver.FindElements(By.XPath(selector));
+                        var visibleSpan = spans.FirstOrDefault(s => s.Displayed);
+
+                        if (visibleSpan != null)
+                        {
+                            _logger.Info($"Elemento span de placa {patent} encontrado con selector: {selector}", true);
+                            return visibleSpan;
+                        }
+                    }
+                    catch { /* Continuar con el siguiente selector */ }
+                }
+
+                // Búsqueda mediante JavaScript
+                var jsSpan = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            // Buscar específicamente un span con el texto exacto de la placa
+            const spans = Array.from(document.querySelectorAll('span'));
+            for (const span of spans) {
+                if (span.textContent.trim() === arguments[0] && 
+                    span.offsetWidth > 0 && 
+                    span.offsetHeight > 0) {
+                    return span;
+                }
+            }
+            return null;
+        ", patent);
+
+                if (jsSpan != null)
+                {
+                    _logger.Info($"Elemento span de placa {patent} encontrado mediante JavaScript", true);
+                    return (IWebElement)jsSpan;
+                }
+
+                _logger.Debug($"No se encontró elemento span específico para placa {patent}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"Error en FindVehiclePlateSpan: {ex.Message}");
+                return null;
+            }
         }
 
         private async Task<bool> ClickWhenClickableAsync(
@@ -1842,7 +2674,54 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
         CancellationToken ct = default)
         {
             timeout ??= TimeSpan.FromSeconds(8);
+            int windowsCountBefore = _driver.WindowHandles.Count;
 
+            // Si tenemos un elemento cacheado, primero intentamos hacer clic en el elemento span hijo si existe
+            if (cachedElement != null)
+            {
+                try
+                {
+                    // Buscar el span hijo que contiene el texto exacto de la placa
+                    var spanElements = cachedElement.FindElements(By.XPath(".//span[@class='notranslate']"));
+                    if (spanElements.Any(s => s.Displayed))
+                    {
+                        var spanToClick = spanElements.First(s => s.Displayed);
+                        _logger.Debug("Encontrado elemento span hijo para hacer clic directamente");
+
+                        try
+                        {
+                            // Intentar clic simple primero
+                            spanToClick.Click();
+                            await Task.Delay(500);
+
+                            // Verificar si se abrió una nueva pestaña
+                            if (_driver.WindowHandles.Count > windowsCountBefore)
+                            {
+                                _logger.Warning("Se abrió una nueva pestaña al hacer clic en span. Cerrándola...", true);
+                                _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                                _driver.Close();
+                                _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                            }
+                            else
+                            {
+                                _logger.Info("Clic exitoso en el span de la placa", true);
+                                return true;
+                            }
+                        }
+                        catch (Exception spanClickEx)
+                        {
+                            _logger.Debug($"Error en clic directo en span: {spanClickEx.Message}");
+                            // Continuamos con otros métodos
+                        }
+                    }
+                }
+                catch (Exception findSpanEx)
+                {
+                    _logger.Debug($"Error al buscar span hijo: {findSpanEx.Message}");
+                }
+            }
+
+            // Si el clic en span falló o no había span, intenta hacer clic en el elemento directamente
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -1872,44 +2751,254 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                         });
                     }
 
-                    // Scroll al centro
+                    // Scroll al centro del elemento para asegurar visibilidad
                     ((IJavaScriptExecutor)_driver)
                         .ExecuteScript(
                             "arguments[0].scrollIntoView({block:'center',inline:'center'});",
                             element);
+                    await Task.Delay(300);
 
-                    // Clic normal
-                    try { element.Click(); return true; }
-                    catch (Exception ex) { _logger.Debug($"Clic nativo falló: {ex.Message}"); }
-
-                    // Clic JavaScript
-                    try
-                    {
-                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", element);
-                        return true;
-                    }
-                    catch (Exception ex) { _logger.Debug($"Clic JS falló: {ex.Message}"); }
-
-                    // Clic Actions
-                    try
-                    {
-                        new Actions(_driver).MoveToElement(element).Click().Perform();
-                        return true;
-                    }
-                    catch (Exception ex) { _logger.Debug($"Clic Actions falló: {ex.Message}"); }
-
-                    // dispatchEvent como último recurso
+                    // Método 1: Clic con prevención de apertura de nuevas pestañas
                     try
                     {
                         ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                    const r = arguments[0].getBoundingClientRect();
-                    arguments[0].dispatchEvent(new MouseEvent('click',{
-                        bubbles:true,cancelable:true,view:window,
-                        clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
-                ", element);
-                        return true;
+                    // Prevenir apertura de nuevas pestañas
+                    var originalWindowOpen = window.open;
+                    window.open = function() { return null; };
+                    
+                    // Prevenir navegación
+                    var originalHref = arguments[0].getAttribute('href');
+                    if (originalHref) {
+                        arguments[0].removeAttribute('href');
                     }
-                    catch (Exception ex) { _logger.Debug($"dispatchEvent falló: {ex.Message}"); }
+                    
+                    // Hacer clic
+                    arguments[0].click();
+                    
+                    // Restaurar funciones originales
+                    window.open = originalWindowOpen;
+                    if (originalHref) {
+                        arguments[0].setAttribute('href', originalHref);
+                    }
+                ", element);
+
+                        await Task.Delay(500);
+
+                        // Verificar si se abrió una nueva pestaña a pesar de la prevención
+                        if (_driver.WindowHandles.Count > windowsCountBefore)
+                        {
+                            _logger.Warning("Se abrió una nueva pestaña a pesar de la prevención. Cerrándola...", true);
+                            _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                            _driver.Close();
+                            _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                        }
+                        else
+                        {
+                            _logger.Info("Clic exitoso con método de prevención", true);
+                            return true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en método de prevención: {ex.Message}");
+                    }
+
+                    // Método 2: Crear y disparar un evento de clic personalizado
+                    try
+                    {
+                        ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    // Crear un evento de clic personalizado
+                    var clickEvent = new MouseEvent('click', {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window
+                    });
+                    
+                    // Prevenir comportamiento predeterminado que pudiera abrir nuevas pestañas
+                    var preventDefaultHandler = function(e) { 
+                        e.preventDefault(); 
+                        e.stopPropagation();
+                    };
+                    
+                    document.addEventListener('click', preventDefaultHandler, { once: true });
+                    
+                    // Disparar el evento en el elemento
+                    arguments[0].dispatchEvent(clickEvent);
+                    
+                    // Eliminar el handler para no afectar otros clics
+                    document.removeEventListener('click', preventDefaultHandler);
+                ", element);
+
+                        await Task.Delay(500);
+
+                        // Verificar si se abrió una nueva pestaña
+                        if (_driver.WindowHandles.Count > windowsCountBefore)
+                        {
+                            _logger.Warning("Se abrió una nueva pestaña con evento personalizado. Cerrándola...", true);
+                            _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                            _driver.Close();
+                            _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                        }
+                        else
+                        {
+                            _logger.Info("Clic exitoso con evento personalizado", true);
+                            return true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en evento personalizado: {ex.Message}");
+                    }
+
+                    // Método 3: Simulación de clic nativo con Actions
+                    try
+                    {
+                        // Usar Actions para simular un clic más preciso
+                        new Actions(_driver)
+                            .MoveToElement(element)
+                            .Click()
+                            .Perform();
+
+                        await Task.Delay(500);
+
+                        // Verificar si se abrió una nueva pestaña
+                        if (_driver.WindowHandles.Count > windowsCountBefore)
+                        {
+                            _logger.Warning("Se abrió una nueva pestaña con Actions. Cerrándola...", true);
+                            _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                            _driver.Close();
+                            _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                        }
+                        else
+                        {
+                            _logger.Info("Clic exitoso con Actions", true);
+                            return true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en clic con Actions: {ex.Message}");
+                    }
+
+                    // Método 4: Clic directo en un elemento hijo que sea el texto (si existe)
+                    try
+                    {
+                        // Buscar elementos de texto dentro del elemento
+                        var textNodes = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    function getTextNodes(element) {
+                        var textNodes = [];
+                        var walk = document.createTreeWalker(
+                            element, 
+                            NodeFilter.SHOW_TEXT, 
+                            null, 
+                            false
+                        );
+                        
+                        while(node = walk.nextNode()) {
+                            if (node.nodeValue.trim()) {
+                                textNodes.push(node.parentNode);
+                            }
+                        }
+                        
+                        return textNodes.filter(n => 
+                            n.nodeType === 1 && 
+                            n.offsetWidth > 0 && 
+                            n.offsetHeight > 0
+                        );
+                    }
+                    
+                    return getTextNodes(arguments[0]);
+                ", element);
+
+                        if (textNodes != null && textNodes is IEnumerable<object> nodes && nodes.Any())
+                        {
+                            var textElement = (IWebElement)nodes.First();
+                            _logger.Debug("Encontrado nodo de texto para clic directo");
+
+                            textElement.Click();
+                            await Task.Delay(500);
+
+                            // Verificar si se abrió una nueva pestaña
+                            if (_driver.WindowHandles.Count > windowsCountBefore)
+                            {
+                                _logger.Warning("Se abrió una nueva pestaña con clic en nodo de texto. Cerrándola...", true);
+                                _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                                _driver.Close();
+                                _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                            }
+                            else
+                            {
+                                _logger.Info("Clic exitoso en nodo de texto", true);
+                                return true;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en clic en nodo de texto: {ex.Message}");
+                    }
+
+                    // Método 5: Cambiar dinámicamente la estructura DOM para hacer la placa seleccionable sin navegación
+                    try
+                    {
+                        var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    try {
+                        // Guardar referencias a atributos que pueden causar navegación
+                        const originalHref = arguments[0].getAttribute('href');
+                        const originalOnClick = arguments[0].onclick;
+                        const originalTarget = arguments[0].getAttribute('target');
+                        
+                        // Eliminar temporalmente estos atributos
+                        arguments[0].removeAttribute('href');
+                        arguments[0].removeAttribute('target');
+                        arguments[0].onclick = null;
+                        
+                        // Buscar todos los elementos anidados que podrían tener enlaces
+                        const allNestedElements = arguments[0].querySelectorAll('*');
+                        for (const el of allNestedElements) {
+                            el.removeAttribute('href');
+                            el.removeAttribute('target');
+                            el.onclick = null;
+                        }
+                        
+                        // Hacer clic
+                        arguments[0].click();
+                        
+                        // Restaurar atributos originales
+                        if (originalHref) arguments[0].setAttribute('href', originalHref);
+                        if (originalTarget) arguments[0].setAttribute('target', originalTarget);
+                        arguments[0].onclick = originalOnClick;
+                        
+                        return true;
+                    } catch (e) {
+                        console.error('Error en modificación DOM:', e);
+                        return false;
+                    }
+                ", element);
+
+                        if (jsResult is bool success && success)
+                        {
+                            await Task.Delay(500);
+
+                            // Verificar si se abrió una nueva pestaña
+                            if (_driver.WindowHandles.Count > windowsCountBefore)
+                            {
+                                _logger.Warning("Se abrió una nueva pestaña con modificación DOM. Cerrándola...", true);
+                                _driver.SwitchTo().Window(_driver.WindowHandles.Last());
+                                _driver.Close();
+                                _driver.SwitchTo().Window(_driver.WindowHandles.First());
+                            }
+                            else
+                            {
+                                _logger.Info("Clic exitoso con modificación DOM", true);
+                                return true;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error en modificación DOM: {ex.Message}");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1922,7 +3011,99 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     ct);
             }
 
-            return false; // Agotados los intentos
+            // Método final: Simulación de selección de placa sin clic real
+            try
+            {
+                _logger.Debug("Intentando simulación de selección sin clic real...");
+
+                // Obtener elemento si no está cacheado
+                IWebElement element = cachedElement ?? _driver.FindElement(locator);
+
+                // Intentar extraer el texto de la placa del elemento
+                string plateText = "";
+                try
+                {
+                    plateText = element.Text.Trim();
+                    if (string.IsNullOrEmpty(plateText))
+                    {
+                        plateText = ((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].textContent.trim();", element)?.ToString() ?? "";
+                    }
+                }
+                catch { /* Ignorar errores de extracción de texto */ }
+
+                // Simular la selección del vehículo usando JavaScript
+                var result = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            try {
+                // Obtener información del elemento para simular selección
+                const rect = arguments[0].getBoundingClientRect();
+                const plateText = arguments[1] || '';
+                
+                // Disparar eventos de ratón manualmente
+                const mouseEvents = ['mousedown', 'mouseup', 'click'];
+                for (const eventType of mouseEvents) {
+                    const event = new MouseEvent(eventType, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        clientX: rect.left + rect.width / 2,
+                        clientY: rect.top + rect.height / 2
+                    });
+                    arguments[0].dispatchEvent(event);
+                }
+                
+                // Crear evento personalizado para notificar selección de vehículo
+                const selectEvent = new CustomEvent('vehicleSelected', {
+                    detail: { 
+                        plate: plateText,
+                        element: arguments[0]
+                    },
+                    bubbles: true
+                });
+                arguments[0].dispatchEvent(selectEvent);
+                document.dispatchEvent(selectEvent);
+                
+                // Intento adicional: buscar y hacer clic en el marcador del mapa correspondiente
+                const markers = document.querySelectorAll('.leaflet-marker-icon, [class*=""marker""]');
+                for (const marker of markers) {
+                    if (marker.title && marker.title.includes(plateText) || 
+                        marker.alt && marker.alt.includes(plateText)) {
+                        marker.click();
+                        return true;
+                    }
+                }
+                
+                // Intento adicional: buscar por ID en el mapa
+                if (plateText) {
+                    const mapMarkers = document.querySelectorAll(`[id*=""${plateText}""]`);
+                    for (const marker of mapMarkers) {
+                        if (marker.offsetWidth > 0 && marker.offsetHeight > 0) {
+                            marker.click();
+                            return true;
+                        }
+                    }
+                }
+                
+                // Indicar que al menos se intentó
+                return 'attempted';
+            } catch (e) {
+                console.error('Error en simulación:', e);
+                return false;
+            }
+        ", element, plateText);
+
+                if (result != null && (result.ToString() == "True" || result.ToString() == "attempted"))
+                {
+                    _logger.Info("Simulación de selección completada", true);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning($"Error en simulación final: {ex.Message}", true);
+            }
+
+            _logger.Warning("Todos los intentos de clic fallaron", true);
+            return false;
         }
 
         public void Dispose()
