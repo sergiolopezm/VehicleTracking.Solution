@@ -947,46 +947,392 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             {
                 _logger.Debug("Iniciando extracción de información del vehículo seleccionado");
 
-                // Esperar a que aparezca el panel de información o los datos en el mapa
-                var (infoPanel, _) = await dynamicWait.WaitForElementAsync(
-                    By.CssSelector(".vehicle-info, .vehicle-details, .info-panel, .popup-content, .leaflet-popup-content"),
-                    "vehicle_info_panel",
+                // Esperar a que el popup de información aparezca
+                var (popup, _) = await dynamicWait.WaitForElementAsync(
+                    By.CssSelector(".leaflet-popup-content, .gm-style-iw-d"),
+                    "vehicle_popup",
                     ensureClickable: false
                 );
 
-                // Extraer coordenadas
-                var coordinates = await ExtractCoordinates(dynamicWait);
+                if (popup == null)
+                {
+                    _logger.Warning("No se pudo encontrar el popup de información del vehículo", true);
+                    throw new InvalidOperationException("No se pudo encontrar el popup de información del vehículo");
+                }
 
-                // Extraer el resto de la información desde el panel o el mapa
+                // Inicializar el objeto LocationDataInfo
                 var locationInfo = new LocationDataInfo
                 {
-                    Latitude = coordinates.Latitude,
-                    Longitude = coordinates.Longitude,
+                    // Valores predeterminados
                     Speed = 0,
                     Timestamp = DateTime.Now,
                     Driver = string.Empty,
                     Georeference = string.Empty,
-                    InZone = string.Empty,
-                    DetentionTime = string.Empty,
+                    InZone = "N/A",
+                    DetentionTime = "0",
                     DistanceTraveled = 0,
                     Temperature = 0,
                     Angle = 0,
-                    Reason = string.Empty
+                    Reason = string.Empty,
+                    Latitude = 0,
+                    Longitude = 0
                 };
 
-                // Si encontramos un panel de información, extraer datos de él
-                if (infoPanel != null)
+                // Extraer coordenadas (Lat/Long)
+                try
                 {
-                    _logger.Debug("Panel de información encontrado, extrayendo datos detallados");
-                    await ExtractDataFromInfoPanel(infoPanel, locationInfo, dynamicWait);
+                    var positionElement = popup.FindElement(By.Id("iwv-position-value"));
+                    if (positionElement != null)
+                    {
+                        var positionText = positionElement.Text.Trim();
+                        _logger.Debug($"Texto de posición: {positionText}");
+
+                        var coordinates = positionText.Split(',');
+                        if (coordinates.Length == 2)
+                        {
+                            if (decimal.TryParse(coordinates[0].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal latitude) &&
+                                decimal.TryParse(coordinates[1].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal longitude))
+                            {
+                                locationInfo.Latitude = latitude;
+                                locationInfo.Longitude = longitude;
+                                _logger.Debug($"Coordenadas extraídas: {latitude}, {longitude}");
+                            }
+                            else
+                            {
+                                _logger.Warning($"No se pudieron parsear las coordenadas: {positionText}", true);
+                            }
+                        }
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    // Intentar extraer información directamente del mapa
-                    _logger.Debug("Panel de información no encontrado, buscando datos en el mapa");
-                    await ExtractDataFromMap(locationInfo, dynamicWait);
+                    _logger.Warning($"Error al extraer coordenadas: {ex.Message}", true);
                 }
 
+                // Extraer dirección (Georeference)
+                try
+                {
+                    var addressElement = popup.FindElement(By.Id("iw-vehicle-address"));
+                    if (addressElement != null)
+                    {
+                        var addressText = addressElement.Text.Trim();
+                        _logger.Debug($"Texto de dirección completo: {addressText}");
+
+                        // Intentar extraer solo el texto de la dirección sin etiquetas
+                        locationInfo.Georeference = addressText;
+                        _logger.Debug($"Dirección extraída: {locationInfo.Georeference}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer dirección: {ex.Message}", true);
+                }
+
+                // Extraer estado del vehículo (Reason)
+                try
+                {
+                    var stateElement = popup.FindElement(By.Id("iwv-state-value-txt"));
+                    if (stateElement != null)
+                    {
+                        locationInfo.Reason = stateElement.Text.Trim();
+                        _logger.Debug($"Estado extraído: {locationInfo.Reason}");
+
+                        // Determinar Driver basado en el estado
+                        switch (locationInfo.Reason.ToLower())
+                        {
+                            case "en movimiento":
+                                locationInfo.Driver = "Conductor manejando";
+                                break;
+                            case "detenido":
+                            case "detenido (ralentí)":
+                                locationInfo.Driver = "Conductor ausente";
+                                break;
+                            case "apagado":
+                                locationInfo.Driver = "Sin conductor";
+                                break;
+                            default:
+                                locationInfo.Driver = "Estado desconocido";
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        _logger.Debug("Elemento iwv-state-value-txt no encontrado, buscando alternativas...");
+
+                        // Buscar alternativas para el estado
+                        var stateContainer = popup.FindElement(By.Id("iw-vehicle-state"));
+                        if (stateContainer != null)
+                        {
+                            locationInfo.Reason = stateContainer.Text.Replace("Estado:", "").Trim();
+                            _logger.Debug($"Estado extraído de contenedor: {locationInfo.Reason}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer estado: {ex.Message}", true);
+                }
+
+                // Extraer velocidad
+                try
+                {
+                    var speedElement = popup.FindElement(By.Id("iwv-speed-value"));
+                    if (speedElement != null)
+                    {
+                        var speedText = speedElement.Text.Trim().Replace("km/h", "").Trim();
+                        _logger.Debug($"Texto de velocidad: {speedText}");
+
+                        if (decimal.TryParse(speedText, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal speed))
+                        {
+                            locationInfo.Speed = speed;
+                            _logger.Debug($"Velocidad extraída: {speed} km/h");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer velocidad: {ex.Message}", true);
+                }
+
+                // Extraer sentido y calcular ángulo
+                try
+                {
+                    var headingElement = popup.FindElement(By.Id("iwv-heading-value"));
+                    if (headingElement != null)
+                    {
+                        var heading = headingElement.Text.Trim();
+                        _logger.Debug($"Sentido extraído: {heading}");
+
+                        // Convertir sentido textual a ángulo aproximado
+                        locationInfo.Angle = ConvertHeadingToAngle(heading);
+                        _logger.Debug($"Ángulo calculado: {locationInfo.Angle}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer sentido: {ex.Message}", true);
+                }
+
+                // Extraer tiempo sin moverse (solo visible en estados Detenido o Apagado)
+                try
+                {
+                    var detentionElement = popup.FindElement(By.Id("iwv-timeWithoutMoving-value"));
+                    if (detentionElement != null)
+                    {
+                        locationInfo.DetentionTime = detentionElement.Text.Trim();
+                        _logger.Debug($"Tiempo sin moverse extraído: {locationInfo.DetentionTime}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // El elemento puede no estar presente si el vehículo está en movimiento
+                    _logger.Debug($"No se encontró tiempo de detención (posiblemente en movimiento): {ex.Message}");
+                    locationInfo.DetentionTime = "0";
+                }
+
+                // MÉTODOS MEJORADOS PARA EXTRAER TIMESTAMP
+
+                // 1. Intentar obtener directamente del elemento de último reporte
+                try
+                {
+                    var lastReportElement = popup.FindElement(By.Id("iw-vehicle-lastReport"));
+                    if (lastReportElement != null)
+                    {
+                        var lastReportText = lastReportElement.Text.Trim();
+                        _logger.Debug($"Texto completo de último reporte: {lastReportText}");
+
+                        // Intentar extraer hora del formato "hace X min/horas"
+                        var timePattern = @"hace\s+(\d+)\s+(min|hora|horas|día|días)";
+                        var match = Regex.Match(lastReportText, timePattern);
+
+                        if (match.Success)
+                        {
+                            var amount = int.Parse(match.Groups[1].Value);
+                            var unit = match.Groups[2].Value;
+
+                            DateTime reportTime = DateTime.Now;
+                            switch (unit)
+                            {
+                                case "min":
+                                    reportTime = reportTime.AddMinutes(-amount);
+                                    break;
+                                case "hora":
+                                case "horas":
+                                    reportTime = reportTime.AddHours(-amount);
+                                    break;
+                                case "día":
+                                case "días":
+                                    reportTime = reportTime.AddDays(-amount);
+                                    break;
+                            }
+
+                            locationInfo.Timestamp = reportTime;
+                            _logger.Debug($"Timestamp calculado del texto 'hace X': {reportTime}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer timestamp de último reporte: {ex.Message}");
+                }
+
+                // 2. Intentar extraer del tooltip mediante simulación de hover
+                try
+                {
+                    _logger.Debug("Intentando extraer timestamp mediante simulación de hover en el reloj...");
+
+                    var lastReportContainer = popup.FindElement(By.Id("iw-vehicle-lastReport"));
+                    var clockIcon = lastReportContainer.FindElement(By.Id("iconLastReport"));
+
+                    if (clockIcon != null)
+                    {
+                        _logger.Debug("Icono de reloj encontrado, intentando simulación de hover...");
+
+                        // Intentar mostrar el tooltip con hover mediante JavaScript
+                        ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    var event = new MouseEvent('mouseover', {
+                        'view': window,
+                        'bubbles': true,
+                        'cancelable': true
+                    });
+                    arguments[0].dispatchEvent(event);
+                ", clockIcon);
+
+                        // Esperar brevemente para que aparezca el tooltip
+                        await Task.Delay(500);
+
+                        // Intentar leer el tooltip después del hover
+                        var tooltipElement = popup.FindElement(By.Id("iw-last-report-value"));
+                        if (tooltipElement != null)
+                        {
+                            var tooltipText = tooltipElement.GetAttribute("textContent") ?? tooltipElement.Text;
+                            _logger.Debug($"Texto obtenido del tooltip después de hover: {tooltipText}");
+
+                            if (!string.IsNullOrEmpty(tooltipText))
+                            {
+                                // Intentar extraer fecha y hora del texto
+                                var dateTimePattern = @"(Hoy|Ayer|\d{2}/\d{2}/\d{4})\s*,\s*(\d{2}:\d{2}:\d{2}\s*(?:AM|PM|a\.m\.|p\.m\.)?)";
+                                var match = Regex.Match(tooltipText, dateTimePattern);
+
+                                if (match.Success)
+                                {
+                                    var dateText = match.Groups[1].Value;
+                                    var timeText = match.Groups[2].Value;
+
+                                    _logger.Debug($"Fecha extraída: '{dateText}', Hora extraída: '{timeText}'");
+
+                                    DateTime reportTime = DateTime.Now;
+
+                                    if (dateText.Equals("Hoy", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        reportTime = DateTime.Today.Add(ParseTimeString(timeText));
+                                    }
+                                    else if (dateText.Equals("Ayer", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        reportTime = DateTime.Today.AddDays(-1).Add(ParseTimeString(timeText));
+                                    }
+                                    else
+                                    {
+                                        // Intentar parsear una fecha específica
+                                        if (DateTime.TryParseExact(
+                                            $"{dateText} {timeText}",
+                                            new[] { "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss tt" },
+                                            CultureInfo.InvariantCulture,
+                                            DateTimeStyles.None,
+                                            out DateTime parsedDate))
+                                        {
+                                            reportTime = parsedDate;
+                                        }
+                                    }
+
+                                    locationInfo.Timestamp = reportTime;
+                                    _logger.Debug($"Timestamp extraído del tooltip: {reportTime}");
+                                }
+                                else
+                                {
+                                    _logger.Warning($"El formato del texto del tooltip no coincide con el patrón esperado: {tooltipText}");
+                                }
+                            }
+                            else
+                            {
+                                _logger.Warning("El tooltip está vacío después del hover");
+                            }
+                        }
+                        else
+                        {
+                            _logger.Warning("No se pudo encontrar el elemento del tooltip después del hover");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error al extraer timestamp mediante hover: {ex.Message}");
+                }
+
+                // 3. Método alternativo: extraer directamente del contenido interno del span
+                try
+                {
+                    var lastReportValueSpan = popup.FindElement(By.Id("iw-last-report-value"));
+                    if (lastReportValueSpan != null)
+                    {
+                        // Intentar obtener el contenido mediante innerHTML o getProperty
+                        var innerContent = ((IJavaScriptExecutor)_driver).ExecuteScript(
+                            "return arguments[0].innerHTML || arguments[0].textContent;",
+                            lastReportValueSpan
+                        )?.ToString();
+
+                        _logger.Debug($"Contenido interno del span de reporte: {innerContent}");
+
+                        if (!string.IsNullOrEmpty(innerContent))
+                        {
+                            // Aplicar el mismo procesamiento de fecha/hora que antes
+                            var dateTimePattern = @"(Hoy|Ayer|\d{2}/\d{2}/\d{4})\s*,\s*(\d{2}:\d{2}:\d{2}\s*(?:AM|PM|a\.m\.|p\.m\.)?)";
+                            var match = Regex.Match(innerContent, dateTimePattern);
+
+                            if (match.Success)
+                            {
+                                var dateText = match.Groups[1].Value;
+                                var timeText = match.Groups[2].Value;
+
+                                _logger.Debug($"Fecha extraída (método alternativo): '{dateText}', Hora: '{timeText}'");
+
+                                // Mismo procesamiento que antes...
+                                DateTime reportTime = DateTime.Now;
+
+                                if (dateText.Equals("Hoy", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    reportTime = DateTime.Today.Add(ParseTimeString(timeText));
+                                }
+                                else if (dateText.Equals("Ayer", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    reportTime = DateTime.Today.AddDays(-1).Add(ParseTimeString(timeText));
+                                }
+                                else
+                                {
+                                    // Intentar parsear una fecha específica
+                                    if (DateTime.TryParseExact(
+                                        $"{dateText} {timeText}",
+                                        new[] { "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm:ss tt" },
+                                        CultureInfo.InvariantCulture,
+                                        DateTimeStyles.None,
+                                        out DateTime parsedDate))
+                                    {
+                                        reportTime = parsedDate;
+                                    }
+                                }
+
+                                locationInfo.Timestamp = reportTime;
+                                _logger.Debug($"Timestamp extraído (método alternativo): {reportTime}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Error en método alternativo de extracción de timestamp: {ex.Message}");
+                }
+
+                _logger.Info("Información del vehículo extraída exitosamente", true);
                 return locationInfo;
             }
             catch (Exception ex)
@@ -996,422 +1342,80 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             }
         }
 
-        private async Task<(decimal Latitude, decimal Longitude)> ExtractCoordinates(DynamicWaitHelper dynamicWait)
+        // Método auxiliar para convertir texto de sentido a ángulo
+        private decimal ConvertHeadingToAngle(string heading)
         {
-            try
-            {
-                _logger.Debug("Extrayendo coordenadas del vehículo");
+            heading = heading.ToLower().Trim();
 
-                // Intentar obtener coordenadas desde la URL
-                var urlCoordinates = await TryGetCoordinatesFromUrl();
-                if (urlCoordinates.HasValue)
-                {
-                    _logger.Info($"Coordenadas extraídas de la URL: {urlCoordinates.Value.Latitude}, {urlCoordinates.Value.Longitude}", true);
-                    return urlCoordinates.Value;
-                }
+            if (heading.Contains("norte"))
+                return 0;
+            else if (heading.Contains("noreste") || heading.Contains("nor-este") || heading.Contains("nor-oriente"))
+                return 45;
+            else if (heading.Contains("este") || heading.Contains("oriente"))
+                return 90;
+            else if (heading.Contains("sureste") || heading.Contains("sur-este") || heading.Contains("sur-oriente"))
+                return 135;
+            else if (heading.Contains("sur"))
+                return 180;
+            else if (heading.Contains("suroeste") || heading.Contains("sur-oeste") || heading.Contains("sur-occidente"))
+                return 225;
+            else if (heading.Contains("oeste") || heading.Contains("occidente"))
+                return 270;
+            else if (heading.Contains("noroeste") || heading.Contains("nor-oeste") || heading.Contains("nor-occidente"))
+                return 315;
 
-                // Intentar obtener coordenadas desde elementos visibles
-                var (coordinatesElement, _) = await dynamicWait.WaitForElementAsync(
-                    By.XPath("//div[contains(text(), 'Latitud') or contains(text(), 'Longitud') or contains(text(), 'Coordenadas')]"),
-                    "coordinates_element",
-                    ensureClickable: false
-                );
-
-                if (coordinatesElement != null)
-                {
-                    var text = coordinatesElement.Text;
-                    var latMatch = System.Text.RegularExpressions.Regex.Match(text, @"Lat[^0-9-]*(-?\d+\.?\d*)");
-                    var lonMatch = System.Text.RegularExpressions.Regex.Match(text, @"L(on|ng)[^0-9-]*(-?\d+\.?\d*)");
-
-                    if (latMatch.Success && lonMatch.Success)
-                    {
-                        var lat = decimal.Parse(latMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-                        var lon = decimal.Parse(lonMatch.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
-
-                        _logger.Info($"Coordenadas extraídas del texto: {lat}, {lon}", true);
-                        return (lat, lon);
-                    }
-                }
-
-                // Intentar extraer coordenadas mediante JavaScript desde el mapa
-                var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-            try {
-                // Buscar objeto mapa (Leaflet o Google Maps)
-                if (window.map && window.map.getCenter) {
-                    var center = window.map.getCenter();
-                    return { lat: center.lat, lng: center.lng };
-                }
-                
-                // Buscar específicamente mapa de Leaflet
-                var leafletMap = null;
-                for (var key in window) {
-                    if (window[key] && typeof window[key] === 'object' && window[key]._leaflet_id) {
-                        leafletMap = window[key];
-                        break;
-                    }
-                }
-                
-                if (leafletMap) {
-                    // Buscar marcador seleccionado
-                    for (var key in leafletMap._layers) {
-                        var layer = leafletMap._layers[key];
-                        if (layer && layer._icon && 
-                            (layer._icon.classList.contains('selected') || 
-                             layer._icon.classList.contains('active') ||
-                             layer._icon.style.zIndex > 900)) {
-                            return { 
-                                lat: layer._latlng.lat, 
-                                lng: layer._latlng.lng 
-                            };
-                        }
-                    }
-                    
-                    // Si no hay marcador seleccionado, usar el centro del mapa
-                    return { 
-                        lat: leafletMap.getCenter().lat, 
-                        lng: leafletMap.getCenter().lng 
-                    };
-                }
-                
-                return null;
-            } catch(e) {
-                console.error('Error extracting coordinates:', e);
-                return null;
-            }
-        ");
-
-                if (jsResult != null)
-                {
-                    var coords = (Dictionary<string, object>)jsResult;
-                    var lat = Convert.ToDecimal(coords["lat"]);
-                    var lng = Convert.ToDecimal(coords["lng"]);
-
-                    _logger.Info($"Coordenadas extraídas con JavaScript: {lat}, {lng}", true);
-                    return (lat, lng);
-                }
-
-                // Si todo falla, buscar por cualquier número que parezca coordenada en la página
-                var pageSource = _driver.PageSource;
-                var latMatches = System.Text.RegularExpressions.Regex.Matches(pageSource, @"lat(itud)?[^0-9-]*(-?\d+\.\d+)");
-                var lonMatches = System.Text.RegularExpressions.Regex.Matches(pageSource, @"lo?n(gitud)?[^0-9-]*(-?\d+\.\d+)");
-
-                if (latMatches.Count > 0 && lonMatches.Count > 0)
-                {
-                    var lat = decimal.Parse(latMatches[0].Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    var lon = decimal.Parse(lonMatches[0].Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
-
-                    _logger.Info($"Coordenadas extraídas del código fuente: {lat}, {lon}", true);
-                    return (lat, lon);
-                }
-
-                _logger.Warning("No se pudieron extraer coordenadas, usando valores por defecto", true);
-                return (0, 0);
-            }
-            catch (Exception ex)
-            {
-                _logger.Error("Error extrayendo coordenadas", ex);
-                return (0, 0);
-            }
+            return 0; // Valor predeterminado
         }
 
-        private async Task<(decimal Latitude, decimal Longitude)?> TryGetCoordinatesFromUrl()
+        // Método auxiliar para parsear strings de tiempo (HH:MM:SS AM/PM)
+        private TimeSpan ParseTimeString(string timeText)
         {
             try
             {
-                var currentUrl = _driver.Url;
+                // Limpiar el texto de tiempo
+                timeText = timeText.Trim();
 
-                // Patrones comunes para coordenadas en URLs
-                var latMatchUrl = System.Text.RegularExpressions.Regex.Match(currentUrl, @"lat=(-?\d+\.?\d*)");
-                var lonMatchUrl = System.Text.RegularExpressions.Regex.Match(currentUrl, @"(lon|lng)=(-?\d+\.?\d*)");
+                // Patrones comunes de formato de hora
+                string[] formats = {
+            "hh:mm:ss tt",
+            "h:mm:ss tt",
+            "HH:mm:ss",
+            "H:mm:ss",
+            "hh:mm tt",
+            "h:mm tt"
+        };
 
-                if (latMatchUrl.Success && lonMatchUrl.Success)
+                if (DateTime.TryParseExact(timeText, formats, CultureInfo.InvariantCulture,
+                                          DateTimeStyles.None, out DateTime parsedTime))
                 {
-                    var lat = decimal.Parse(latMatchUrl.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    var lon = decimal.Parse(lonMatchUrl.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    return (lat, lon);
+                    return parsedTime.TimeOfDay;
                 }
 
-                // Probar otros formatos (por ejemplo, coordenadas directamente en la ruta)
-                var coordsMatch = System.Text.RegularExpressions.Regex.Match(currentUrl, @"@(-?\d+\.?\d*),(-?\d+\.?\d*)");
-                if (coordsMatch.Success)
+                // Si falla el parsing estándar, intentar manualmente
+                var components = Regex.Match(timeText, @"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|a\.m\.|p\.m\.)?");
+
+                if (components.Success)
                 {
-                    var lat = decimal.Parse(coordsMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    var lon = decimal.Parse(coordsMatch.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    return (lat, lon);
+                    int hours = int.Parse(components.Groups[1].Value);
+                    int minutes = int.Parse(components.Groups[2].Value);
+                    int seconds = components.Groups[3].Success ? int.Parse(components.Groups[3].Value) : 0;
+
+                    string ampm = components.Groups[4].Value.ToLower();
+
+                    // Ajustar horas si es PM
+                    if (ampm.Contains("p") && hours < 12)
+                        hours += 12;
+                    else if (ampm.Contains("a") && hours == 12)
+                        hours = 0;
+
+                    return new TimeSpan(hours, minutes, seconds);
                 }
 
-                return null;
+                return new TimeSpan(0, 0, 0); // Valor predeterminado
             }
             catch
             {
-                return null;
-            }
-        }
-
-        private async Task ExtractDataFromInfoPanel(IWebElement infoPanel, LocationDataInfo locationInfo, DynamicWaitHelper dynamicWait)
-        {
-            try
-            {
-                // Extraer los datos del panel usando JavaScript para mayor robustez
-                var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-            function extractData(panel) {
-                const result = {};
-                const text = panel.textContent || '';
-                
-                // Función para extraer datos con diferentes patrones
-                function extract(patterns, defaultValue = '') {
-                    for (const pattern of patterns) {
-                        const regex = new RegExp(pattern.regex, 'i');
-                        const match = text.match(regex);
-                        if (match && match[pattern.group]) {
-                            return match[pattern.group].trim();
-                        }
-                    }
-                    return defaultValue;
-                }
-                
-                // Extraer velocidad
-                result.speed = extract([
-                    { regex: 'Velocidad[^0-9]*([0-9.,]+)', group: 1 },
-                    { regex: 'Speed[^0-9]*([0-9.,]+)', group: 1 }
-                ]);
-                
-                // Extraer fecha/hora
-                result.timestamp = extract([
-                    { regex: 'Fecha[^:]*:([^]*?)(?:Veloc|\n|$)', group: 1 },
-                    { regex: 'Hora[^:]*:([^]*?)(?:Veloc|\n|$)', group: 1 },
-                    { regex: 'Date[^:]*:([^]*?)(?:Speed|\n|$)', group: 1 }
-                ]);
-                
-                // Extraer conductor
-                result.driver = extract([
-                    { regex: 'Conductor[^:]*:([^]*?)(?:\n|$)', group: 1 },
-                    { regex: 'Driver[^:]*:([^]*?)(?:\n|$)', group: 1 }
-                ]);
-                
-                // Extraer georeferencia
-                result.georeference = extract([
-                    { regex: 'Dirección|Ubicación|Direc[^:]*:([^]*?)(?:\n|$)', group: 1 },
-                    { regex: 'Address|Location[^:]*:([^]*?)(?:\n|$)', group: 1 }
-                ]);
-                
-                // Extraer zona
-                result.inZone = extract([
-                    { regex: 'Zona|Área|Area[^:]*:([^]*?)(?:\n|$)', group: 1 },
-                    { regex: 'Zone[^:]*:([^]*?)(?:\n|$)', group: 1 }
-                ]);
-                
-                // Extraer tiempo de detención
-                result.detentionTime = extract([
-                    { regex: 'Detenido|Parada|Detención[^:]*:([^]*?)(?:\n|$)', group: 1 },
-                    { regex: 'Stopped|Detention[^:]*:([^]*?)(?:\n|$)', group: 1 }
-                ]);
-                
-                // Extraer distancia recorrida
-                result.distanceTraveled = extract([
-                    { regex: 'Distancia|Recorrido|Odómetro[^:]*:([^]*?)(?:km|\n|$)', group: 1 },
-                    { regex: 'Distance|Odometer[^:]*:([^]*?)(?:km|\n|$)', group: 1 }
-                ]);
-                
-                // Extraer temperatura
-                result.temperature = extract([
-                    { regex: 'Temperatura|Temp[^:]*:([^]*?)(?:°C|\n|$)', group: 1 },
-                    { regex: 'Temperature[^:]*:([^]*?)(?:°C|\n|$)', group: 1 }
-                ]);
-                
-                // Extraer ángulo
-                result.angle = extract([
-                    { regex: 'Ángulo|Angulo|Rumbo|Heading[^:]*:([^]*?)(?:°|\n|$)', group: 1 },
-                    { regex: 'Angle|Course[^:]*:([^]*?)(?:°|\n|$)', group: 1 }
-                ]);
-                
-                // Extraer estado/evento/motivo
-                result.reason = extract([
-                    { regex: 'Estado|Evento|Motivo|Status[^:]*:([^]*?)(?:\n|$)', group: 1 },
-                    { regex: 'Event|Reason[^:]*:([^]*?)(?:\n|$)', group: 1 }
-                ]);
-                
-                return result;
-            }
-            return extractData(arguments[0]);
-        ", infoPanel);
-
-                if (jsResult != null)
-                {
-                    var data = (Dictionary<string, object>)jsResult;
-
-                    // Procesar velocidad
-                    if (data.ContainsKey("speed") && data["speed"] != null)
-                    {
-                        var speedStr = data["speed"].ToString();
-                        if (!string.IsNullOrEmpty(speedStr) && decimal.TryParse(speedStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal speed))
-                        {
-                            locationInfo.Speed = speed;
-                        }
-                    }
-
-                    // Procesar timestamp
-                    if (data.ContainsKey("timestamp") && data["timestamp"] != null)
-                    {
-                        var timestampStr = data["timestamp"].ToString();
-                        if (!string.IsNullOrEmpty(timestampStr))
-                        {
-                            // Intentar varios formatos de fecha comunes
-                            string[] dateFormats = {
-                        "dd/MM/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm:ss",
-                        "yyyy-MM-dd HH:mm:ss", "dd-MM-yyyy HH:mm:ss",
-                        "dd/MM/yyyy HH:mm", "MM/dd/yyyy HH:mm",
-                        "yyyy-MM-dd HH:mm", "dd-MM-yyyy HH:mm"
-                    };
-
-                            if (DateTime.TryParseExact(timestampStr.Trim(), dateFormats,
-                                                      System.Globalization.CultureInfo.InvariantCulture,
-                                                      System.Globalization.DateTimeStyles.None, out DateTime parsedDate))
-                            {
-                                locationInfo.Timestamp = parsedDate;
-                            }
-                            else if (DateTime.TryParse(timestampStr.Trim(), out parsedDate))
-                            {
-                                locationInfo.Timestamp = parsedDate;
-                            }
-                        }
-                    }
-
-                    // Procesar otros datos de texto
-                    if (data.ContainsKey("driver") && data["driver"] != null)
-                        locationInfo.Driver = data["driver"].ToString() ?? string.Empty;
-
-                    if (data.ContainsKey("georeference") && data["georeference"] != null)
-                        locationInfo.Georeference = data["georeference"].ToString() ?? string.Empty;
-
-                    if (data.ContainsKey("inZone") && data["inZone"] != null)
-                        locationInfo.InZone = data["inZone"].ToString() ?? string.Empty;
-
-                    if (data.ContainsKey("detentionTime") && data["detentionTime"] != null)
-                        locationInfo.DetentionTime = data["detentionTime"].ToString() ?? string.Empty;
-
-                    // Procesar valores numéricos
-                    if (data.ContainsKey("distanceTraveled") && data["distanceTraveled"] != null)
-                    {
-                        var distStr = data["distanceTraveled"].ToString();
-                        if (!string.IsNullOrEmpty(distStr) && decimal.TryParse(distStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal dist))
-                        {
-                            locationInfo.DistanceTraveled = dist;
-                        }
-                    }
-
-                    if (data.ContainsKey("temperature") && data["temperature"] != null)
-                    {
-                        var tempStr = data["temperature"].ToString();
-                        if (!string.IsNullOrEmpty(tempStr) && decimal.TryParse(tempStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal temp))
-                        {
-                            locationInfo.Temperature = temp;
-                        }
-                    }
-
-                    if (data.ContainsKey("angle") && data["angle"] != null)
-                    {
-                        var angleStr = data["angle"].ToString();
-                        if (!string.IsNullOrEmpty(angleStr) && decimal.TryParse(angleStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out decimal angle))
-                        {
-                            locationInfo.Angle = angle;
-                        }
-                    }
-
-                    if (data.ContainsKey("reason") && data["reason"] != null)
-                        locationInfo.Reason = data["reason"].ToString() ?? string.Empty;
-                }
-
-                // Si no hay razón, construir una a partir de otros datos
-                if (string.IsNullOrEmpty(locationInfo.Reason))
-                {
-                    var reasonBuilder = new List<string>();
-
-                    if (!string.IsNullOrEmpty(locationInfo.Driver))
-                        reasonBuilder.Add($"Conductor: {locationInfo.Driver}");
-
-                    if (!string.IsNullOrEmpty(locationInfo.Georeference))
-                        reasonBuilder.Add($"Ubicación: {locationInfo.Georeference}");
-
-                    if (!string.IsNullOrEmpty(locationInfo.InZone))
-                        reasonBuilder.Add($"Zona: {locationInfo.InZone}");
-
-                    if (locationInfo.Speed > 0)
-                        reasonBuilder.Add($"Velocidad: {locationInfo.Speed} km/h");
-
-                    if (!string.IsNullOrEmpty(locationInfo.DetentionTime))
-                        reasonBuilder.Add($"Tiempo Detenido: {locationInfo.DetentionTime}");
-
-                    locationInfo.Reason = string.Join(" | ", reasonBuilder);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning($"Error extrayendo datos del panel de información: {ex.Message}");
-            }
-        }
-
-        private async Task ExtractDataFromMap(LocationDataInfo locationInfo, DynamicWaitHelper dynamicWait)
-        {
-            try
-            {
-                // Extraer datos directamente del mapa o la interfaz usando JavaScript
-                var jsResult = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-            function extractMapData() {
-                const result = {};
-                
-                // Buscar elementos que podrían contener información del vehículo
-                const elements = document.querySelectorAll('.vehicle-data, .info-box, .map-popup, .leaflet-popup-content');
-                
-                for (const element of elements) {
-                    const text = element.textContent || '';
-                    
-                    // Extraer velocidad
-                    const speedMatch = text.match(/Velocidad[^0-9]*(\d+\.?\d*)/i);
-                    if (speedMatch) result.speed = parseFloat(speedMatch[1]);
-                    
-                    // Extraer dirección/ubicación
-                    const geoMatch = text.match(/Dirección|Ubicación[^:]*:([^]*?)(?:\n|$)/i);
-                    if (geoMatch) result.georeference = geoMatch[1].trim();
-                    
-                    // Extraer estado/evento
-                    const stateMatch = text.match(/Estado|Evento[^:]*:([^]*?)(?:\n|$)/i);
-                    if (stateMatch) result.reason = stateMatch[1].trim();
-                }
-                
-                return result;
-            }
-            return extractMapData();
-        ");
-
-                if (jsResult != null)
-                {
-                    var data = (Dictionary<string, object>)jsResult;
-
-                    if (data.ContainsKey("speed") && data["speed"] != null)
-                        locationInfo.Speed = Convert.ToDecimal(data["speed"]);
-
-                    if (data.ContainsKey("georeference") && data["georeference"] != null)
-                        locationInfo.Georeference = data["georeference"].ToString() ?? string.Empty;
-
-                    if (data.ContainsKey("reason") && data["reason"] != null)
-                        locationInfo.Reason = data["reason"].ToString() ?? string.Empty;
-                }
-
-                // Si no hay razón, intentar construir una básica
-                if (string.IsNullOrEmpty(locationInfo.Reason))
-                {
-                    locationInfo.Reason = locationInfo.Speed > 0
-                        ? $"En movimiento a {locationInfo.Speed} km/h"
-                        : "Detenido";
-
-                    if (!string.IsNullOrEmpty(locationInfo.Georeference))
-                        locationInfo.Reason += $" | Ubicación: {locationInfo.Georeference}";
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warning($"Error extrayendo datos del mapa: {ex.Message}");
+                return new TimeSpan(0, 0, 0);
             }
         }
 
