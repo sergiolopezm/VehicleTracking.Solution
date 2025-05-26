@@ -315,7 +315,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 if (!_isLoggedIn)
                     throw new InvalidOperationException("No se ha iniciado sesión");
 
-                // 1️⃣  Validar salud de la página
+                // 1️⃣ Validar salud de la página
                 await CheckPageStatus("inicio de búsqueda de vehículo");
 
                 // Verificar si estamos en la página "no encontrada" y manejarla
@@ -323,7 +323,6 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 if (!notFoundHandled)
                 {
                     _logger.Warning("Se detectó página 'no encontrada' durante la búsqueda del vehículo", true);
-                    // Intentar navegar a la página principal o hacer un refresh como alternativa
                     try
                     {
                         _driver.Navigate().Refresh();
@@ -337,35 +336,38 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
 
                 var dynamicWait = new DynamicWaitHelper(_driver);
 
-                // 2️⃣  Garantizar que la interfaz principal terminó de cargar
-                await EnsureMainPageIsFullyLoaded(dynamicWait);
-
-                // 3️⃣  Asegurarnos de estar en la vista de mapa/vehículos
-                await NavigateToVehiclesSection(dynamicWait);
-
-                // 4️⃣  Esperar de forma **dinámica** a que la lista de vehículos esté lista
-                var listReady = await WaitForVehicleListReady(dynamicWait, TimeSpan.FromSeconds(60));
-                if (!listReady)
+                // 2️⃣ NUEVA VERIFICACIÓN RÁPIDA: ¿La placa específica ya está visible?
+                var plateAlreadyReady = await IsSpecificPlateReady(patent, 3);
+                if (plateAlreadyReady)
                 {
-                    _logger.Warning(
-                        "La lista de vehículos no estuvo disponible dentro del tiempo máximo de espera",
-                        true);
+                    _logger.Info($"🚀 Placa {patent} detectada inmediatamente, omitiendo esperas largas", true);
+                }
+                else
+                {
+                    // 3️⃣ Solo si la placa no está lista, hacer verificaciones completas
+                    await EnsureMainPageIsFullyLoaded(dynamicWait);
+                    await NavigateToVehiclesSection(dynamicWait);
+
+                    // 4️⃣ Esperar de forma **optimizada** a que la lista de vehículos esté lista
+                    var listReady = await WaitForVehicleListReady(dynamicWait, TimeSpan.FromSeconds(15)); // Reducido de 60s
+                    if (!listReady)
+                    {
+                        _logger.Warning("La lista de vehículos no estuvo disponible, pero continuando...", true);
+                    }
                 }
 
                 _logger.Debug($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds} ms] " +
                               $"Iniciando búsqueda de vehículo {patent}");
 
-                // 5️⃣  Buscar el vehículo
+                // 5️⃣ Buscar el vehículo (este proceso ya es eficiente)
                 var vehicleElement = await FindVehicleInVehicleList(patent, dynamicWait);
                 if (vehicleElement == null)
                     throw new InvalidOperationException(
                         $"CONFIGURACION_INVALIDA: No se encontró el vehículo con placa {patent}");
 
-                // 6️⃣  Clic en la placa para centrar el mapa
-                // Primero intentar encontrar el elemento específico de la placa dentro del contenedor
+                // 6️⃣ Clic en la placa para centrar el mapa
                 IWebElement? elementToClick = vehicleElement;
 
-                // Buscar si hay un elemento más específico que contenga la placa exacta
                 var plateElement = await FindPlateElementInContainer(vehicleElement, patent);
                 if (plateElement != null)
                 {
@@ -373,7 +375,6 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                     elementToClick = plateElement;
                 }
 
-                // Realizar el clic en el elemento más específico encontrado
                 var clickResult = await ClickWhenClickableAsync(
                     By.Id(elementToClick.GetAttribute("id") ?? string.Empty),
                     cachedElement: elementToClick);
@@ -382,16 +383,13 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 {
                     _logger.Warning($"No se pudo hacer clic en el elemento de placa {patent}. Intentando alternativas...", true);
 
-                    // Intentar con JavaScript directo para simular selección sin navegación
                     try
                     {
                         ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                    // Simular selección del vehículo sin abrir nueva ventana
                     var evt = document.createEvent('MouseEvents');
                     evt.initEvent('mousedown', true, true);
                     arguments[0].dispatchEvent(evt);
                     
-                    // Disparar evento personalizado para notificar selección
                     var selectEvent = new CustomEvent('vehicleSelected', { detail: { plate: arguments[1] } });
                     document.dispatchEvent(selectEvent);
                 ", elementToClick, patent);
@@ -407,14 +405,15 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 _logger.Info($"[Tiempo transcurrido: {stopwatch.ElapsedMilliseconds} ms] " +
                              $"Vehículo {patent} seleccionado", true);
 
-                // 7️⃣  Esperar a que el mapa termine de actualizar
+                // 7️⃣ Esperar mínimamente a que el mapa termine de actualizar
                 await dynamicWait.WaitForConditionAsync(
                     d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait"))
                            .Any(e => e.Displayed),
                     "map_update_complete",
-                    TimeSpan.FromSeconds(10));
+                    TimeSpan.FromSeconds(3) // Reducido de 10s
+                );
 
-                // 8️⃣  Extraer toda la información
+                // 8️⃣ Extraer información
                 var locationInfo = await ExtractVehicleInformation(dynamicWait);
 
                 _logger.Info($"[Tiempo TOTAL: {stopwatch.ElapsedMilliseconds} ms] " +
@@ -442,241 +441,116 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
         private async Task<IWebElement?> FindVehicleInVehicleList(
         string patent,
         DynamicWaitHelper dynamicWait)
+        {
+            try
             {
-                try
+                _logger.Debug($"Buscando vehículo con placa {patent} en la lista…");
+
+                /* ───────────────────────────────────────── 0️⃣  intento directo */
+                var plateSpan = await FindVehiclePlateSpan(patent);
+                if (plateSpan is not null)
                 {
-                    _logger.Debug($"Buscando vehículo con placa {patent} en la lista");
+                    _logger.Info($"Placa {patent} encontrada directamente en pantalla", true);
+                    return plateSpan;
+                }
 
-                    // 1. Localizar contenedor de la lista (scrollable)
-                    var vehicleList = await WaitForVehicleListContainer(dynamicWait);
-                    if (vehicleList == null)
+                /* ───────────────────────────────────────── 1️⃣  contenedor lista */
+                var vehicleList = await WaitForVehicleListContainer(dynamicWait);
+                if (vehicleList is null)
+                {
+                    _logger.Warning("No se encontró el contenedor de la lista de vehículos", true);
+                    return null;
+                }
+
+                /* ───────────────────────────────────────── 2️⃣  filtro rápido   */
+                var (searchInput, _) = await dynamicWait.WaitForElementAsync(
+                    By.CssSelector(
+                        "input[placeholder*='Buscar'],input[aria-label*='buscar']," +
+                        "input[placeholder*='Filtrar'],input.search-input"),
+                    "search_input",
+                    ensureClickable: false /* solo necesitamos escribir */);
+
+                if (searchInput is not null)
+                {
+                    try
                     {
-                        _logger.Warning("No se encontró la lista de vehículos en la interfaz", true);
-
-                        // Intentar búsqueda directa sin contenedor
-                        var directElement = await FindVehiclePlateSpan(patent);
-                        if (directElement != null)
-                        {
-                            return directElement;
-                        }
-
-                        return null;
-                    }
-
-                    // 2. Usar el cuadro de búsqueda si existe - CORREGIDO
-                    var (searchInput, searchError) = await dynamicWait.WaitForElementAsync(
-                        By.CssSelector(
-                            "input[placeholder*='Buscar'], input[aria-label*='buscar'], " +
-                            "input[placeholder*='Filtrar'], input.search-input"),
-                        "search_input",
-                        ensureClickable: true
-                    // ✅ Removido timeout: TimeSpan.FromSeconds(5)
-                    );
-
-                    if (searchInput != null)
-                    {
-                        _logger.Debug("Aplicando filtro en el cuadro de búsqueda");
-
-                        // Limpiar el campo antes de escribir
                         searchInput.Clear();
-
-                        // Escribir lentamente para asegurar que el sistema capture cada tecla
-                        foreach (char c in patent)
-                        {
-                            searchInput.SendKeys(c.ToString());
-                            await Task.Delay(100);
-                        }
-
-                        // Presionar Enter para confirmar la búsqueda
-                        searchInput.SendKeys(Keys.Enter);
+                        searchInput.SendKeys(patent + Keys.Enter);
 
                         await dynamicWait.WaitForAjaxCompletionAsync();
-                        await dynamicWait.WaitForConditionAsync(
-                            d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait")).Any(e => e.Displayed),
-                            "search_filter_complete",
-                            TimeSpan.FromSeconds(5) // ✅ Aquí SÍ podemos usar timeout
-                        );
-
-                        // Pausa para permitir que los resultados se actualicen
-                        await Task.Delay(1000);
+                        await Task.Delay(250); // pequeño respiro para el re-render
                     }
-
-                    if (searchInput != null)
+                    catch (Exception ex)
                     {
-                        _logger.Debug("Aplicando filtro en el cuadro de búsqueda");
-
-                        // Limpiar el campo antes de escribir
-                        searchInput.Clear();
-
-                        // Escribir lentamente para asegurar que el sistema capture cada tecla
-                        foreach (char c in patent)
-                        {
-                            searchInput.SendKeys(c.ToString());
-                            await Task.Delay(100);
-                        }
-
-                        // Presionar Enter para confirmar la búsqueda
-                        searchInput.SendKeys(Keys.Enter);
-
-                        await dynamicWait.WaitForAjaxCompletionAsync();
-                        await dynamicWait.WaitForConditionAsync(
-                            d => !d.FindElements(By.CssSelector(".loading, .spinner, .wait")).Any(e => e.Displayed),
-                            "search_filter_complete",
-                            TimeSpan.FromSeconds(5)
-                        );
-
-                        // Pausa para permitir que los resultados se actualicen
-                        await Task.Delay(1000);
+                        _logger.Warning($"Error al interactuar con el cuadro de búsqueda: {ex.Message}", true);
                     }
 
-                    // 3. Intento directo buscando por el span exacto de la placa
-                    var plateSpan = await FindVehiclePlateSpan(patent);
-                    if (plateSpan != null)
-                    {
-                        _logger.Info($"Placa {patent} encontrada directamente a través de su span", true);
-                        return plateSpan;
-                    }
-
-                    // 4. Intento encontrando el contenedor de la placa
-                    var vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
-                    if (vehicleItem != null)
-                    {
-                        _logger.Info($"Vehículo {patent} encontrado por su contenedor", true);
-                        return vehicleItem;
-                    }
-
-                    // 5. Scroll en la lista de vehículos si los métodos anteriores fallaron
-                    _logger.Debug("Placa no visible; iniciando scroll progresivo en la lista de vehículos");
-
-                    // Scroll al inicio para comenzar la búsqueda desde arriba
-                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop = 0;", vehicleList);
-                    await Task.Delay(500);
-
-                    // Intento rápido después de volver al inicio
                     plateSpan = await FindVehiclePlateSpan(patent);
-                    if (plateSpan != null)
+                    if (plateSpan is not null)
                     {
-                        _logger.Info($"Placa {patent} encontrada después de scroll al inicio", true);
+                        _logger.Info($"Placa {patent} encontrada después de filtrar", true);
                         return plateSpan;
                     }
-
-                    // Calcular propiedades de scroll
-                    int scrollHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollHeight", vehicleList));
-                    int clientHeight = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].clientHeight", vehicleList));
-                    int scrollStep = Math.Max(clientHeight / 3, 50); // Usar un paso más pequeño para no perder elementos
-
-                    _logger.Debug($"Iniciando scroll progresivo: altura={scrollHeight}, altura visible={clientHeight}, paso={scrollStep}");
-
-                    // Scroll progresivo
-                    for (int step = 0; step <= scrollHeight; step += scrollStep)
-                    {
-                        // Establecer la posición de scroll
-                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollTop = arguments[1];", vehicleList, step);
-                        await Task.Delay(300);
-
-                        // Buscar el elemento span de la placa
-                        plateSpan = await FindVehiclePlateSpan(patent);
-                        if (plateSpan != null)
-                        {
-                            _logger.Info($"Placa {patent} encontrada después de scroll a posición {step}", true);
-
-                            // Centrar el elemento
-                            ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", plateSpan);
-                            await Task.Delay(300);
-
-                            return plateSpan;
-                        }
-
-                        // Buscar el contenedor de la placa
-                        vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
-                        if (vehicleItem != null)
-                        {
-                            _logger.Info($"Contenedor de placa {patent} encontrado después de scroll a posición {step}", true);
-
-                            // Centrar el elemento
-                            ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].scrollIntoView({block: 'center'});", vehicleItem);
-                            await Task.Delay(300);
-
-                            return vehicleItem;
-                        }
-
-                        // Verificar si hemos llegado al final de la lista
-                        int currentScrollTop = Convert.ToInt32(((IJavaScriptExecutor)_driver).ExecuteScript("return arguments[0].scrollTop;", vehicleList));
-                        if (currentScrollTop + clientHeight >= scrollHeight - 20)
-                        {
-                            _logger.Debug("Llegamos al final de la lista sin encontrar la placa");
-                            break;
-                        }
-                    }
-
-                    // 6. Último intento: búsqueda exhaustiva con JavaScript
-                    _logger.Debug("Intentando búsqueda exhaustiva con JavaScript");
-
-                    var jsElement = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
-                function findVehicleElement(patent) {
-                    // 1. Buscar span con clase notranslate
-                    const spans = document.querySelectorAll('span.notranslate');
-                    for (const span of spans) {
-                        if (span.textContent.trim() === patent && 
-                            span.offsetWidth > 0 && 
-                            span.offsetHeight > 0) {
-                        
-                            // Hacer visible si es necesario
-                            const container = span.closest('div[class*=""vehicle-list""], div[class*=""sidebar""]');
-                            if (container) {
-                                const rect = span.getBoundingClientRect();
-                                if (rect.top < 0 || rect.bottom > window.innerHeight) {
-                                    span.scrollIntoView({block: 'center'});
-                                }
-                            }
-                        
-                            return span;
-                        }
-                    }
-                
-                    // 2. Buscar div con ID que contenga la placa
-                    const divs = document.querySelectorAll(`div[id*=""${patent}""]`);
-                    for (const div of divs) {
-                        if (div.offsetWidth > 0 && div.offsetHeight > 0) {
-                            // Hacer visible si es necesario
-                            div.scrollIntoView({block: 'center'});
-                            return div;
-                        }
-                    }
-                
-                    // 3. Buscar cualquier elemento con el texto exacto
-                    const allElements = document.querySelectorAll('*');
-                    for (const el of allElements) {
-                        if (el.textContent.trim() === patent && 
-                            el.offsetWidth > 0 && 
-                            el.offsetHeight > 0) {
-                            // Hacer visible si es necesario
-                            el.scrollIntoView({block: 'center'});
-                            return el;
-                        }
-                    }
-                
-                    return null;
                 }
-            
-                return findVehicleElement(arguments[0]);
-            ", patent);
 
-                    if (jsElement != null)
-                    {
-                        _logger.Info($"Elemento de placa {patent} encontrado mediante búsqueda JavaScript exhaustiva", true);
-                        return (IWebElement)jsElement;
-                    }
-
-                    _logger.Warning($"No se pudo encontrar la placa {patent} después de múltiples intentos", true);
-                    return null;
-                }
-                catch (Exception ex)
+                /* ───────────────────────────────────────── 3️⃣  búsqueda puntual */
+                var vehicleItem = await FindVehicleItemByPatent(patent, dynamicWait);
+                if (vehicleItem is not null)
                 {
-                    _logger.Error($"Error en FindVehicleInVehicleList: {ex.Message}", ex);
-                    return null;
+                    _logger.Info($"Vehículo {patent} encontrado por selector puntual", true);
+                    return vehicleItem;
                 }
+
+                /* ───────────────────────────────────────── 4️⃣  scroll progresivo */
+                var scrolledElement = await ScrollAndFindVehicle(patent, vehicleList, dynamicWait);
+                if (scrolledElement is not null)
+                    return scrolledElement;
+
+                /* ───────────────────────────────────────── 5️⃣  búsqueda JS global */
+                var jsElement = (IWebElement?)((IJavaScriptExecutor)_driver).ExecuteScript(@"
+            function findPlate(plate){
+                // span clásico
+                const span = Array.from(document.querySelectorAll('span.notranslate'))
+                                   .find(s=>s.textContent.trim()===plate);
+                if (span) return span;
+
+                // div con id que contenga la placa
+                const div = document.querySelector(`div[id*='${plate}']`);
+                if (div) return div;
+
+                // cualquier nodo de texto exacto visible
+                const walker = document.createTreeWalker(document.body,
+                    NodeFilter.SHOW_TEXT,null,false);
+                while(walker.nextNode()){
+                    const n = walker.currentNode;
+                    if(n.nodeValue.trim()===plate &&
+                       n.parentElement.offsetWidth>0 &&
+                       n.parentElement.offsetHeight>0){
+                        return n.parentElement;
+                    }
+                }
+                return null;
             }
+            return findPlate(arguments[0]);", patent);
+
+                if (jsElement is not null)
+                {
+                    ((IJavaScriptExecutor)_driver)
+                        .ExecuteScript("arguments[0].scrollIntoView({block:'center'});", jsElement);
+
+                    _logger.Info($"Placa {patent} localizada mediante búsqueda JavaScript exhaustiva", true);
+                    return jsElement;
+                }
+
+                _logger.Warning($"No se pudo localizar la placa {patent} tras agotar todos los métodos", true);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"Error en FindVehicleInVehicleList: {ex.Message}", ex);
+                return null;
+            }
+        }
 
         private async Task<IWebElement?> FindVehicleItemByPatent(string patent, DynamicWaitHelper dynamicWait)
         {
@@ -2052,19 +1926,20 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             }
         }
 
-        private async Task<bool> WaitForVehicleVirtualScrollReady(DynamicWaitHelper dynamicWait, int timeoutSeconds = 45)
+        private async Task<bool> WaitForVehicleVirtualScrollReady(DynamicWaitHelper dynamicWait, int timeoutSeconds = 20)
         {
             try
             {
-                _logger.Debug("Esperando que el virtual scroll de vehículos esté listo...");
+                _logger.Debug("Esperando que el virtual scroll de vehículos esté listo (optimizado)...");
 
                 var deadline = DateTime.Now.AddSeconds(timeoutSeconds);
                 var lastLogTime = DateTime.MinValue;
+                bool quickCheckPassed = false;
 
                 while (DateTime.Now < deadline)
                 {
-                    // Log de progreso cada 5 segundos
-                    if (DateTime.Now.Subtract(lastLogTime).TotalSeconds >= 5)
+                    // Log de progreso cada 3 segundos (reducido de 5)
+                    if (DateTime.Now.Subtract(lastLogTime).TotalSeconds >= 3)
                     {
                         var remaining = deadline.Subtract(DateTime.Now).TotalSeconds;
                         _logger.Debug($"Esperando virtual scroll... {remaining:F0}s restantes");
@@ -2073,85 +1948,80 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
 
                     try
                     {
-                        // Verificar usando JavaScript optimizado
-                        var scrollStatus = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                        // VERIFICACIÓN RÁPIDA OPTIMIZADA - prioriza detectar placas visibles
+                        var quickCheck = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
                     try {
-                        // 1. Verificar que el contenedor principal existe y es visible
-                        const scrollContainer = document.querySelector('[id*=""cdk_scroll_location_vehicles_list""], cdk-virtual-scroll-viewport, .cdk-virtual-scroll-viewport');
-                        if (!scrollContainer || scrollContainer.offsetHeight === 0) {
-                            return { ready: false, reason: 'Container not found or not visible' };
-                        }
-
-                        // 2. Verificar que no hay indicadores de carga específicos del virtual scroll
-                        const loadingIndicators = document.querySelectorAll('.cdk-virtual-scroll-content-wrapper .loading, .cdk-virtual-scroll-content-wrapper .spinner');
-                        const visibleLoading = Array.from(loadingIndicators).some(el => 
-                            el.offsetHeight > 0 && el.offsetWidth > 0 && 
-                            getComputedStyle(el).display !== 'none'
-                        );
-                        
-                        if (visibleLoading) {
-                            return { ready: false, reason: 'Loading indicators still visible' };
-                        }
-
-                        // 3. Verificar que hay elementos de vehículos renderizados (placas)
-                        const vehicleElements = document.querySelectorAll(
-                            '[class*=""item-veh""], [class*=""vehicle""], [id*=""GVS""], [id*=""alias""], ' +
-                            '.cdk-virtual-scroll-content-wrapper [class*=""item""]'
-                        );
-                        
-                        const visibleVehicles = Array.from(vehicleElements).filter(el => {
-                            // Verificar que el elemento es visible
+                        // 1. Verificación rápida: ¿hay placas visibles inmediatamente?
+                        const visiblePlates = Array.from(document.querySelectorAll(
+                            'span.notranslate, [class*=""item-veh""], [id*=""alias""], [class*=""vehicle""]'
+                        )).filter(el => {
                             if (el.offsetHeight === 0 || el.offsetWidth === 0) return false;
-                            
-                            // Verificar que contiene texto que parece una placa
                             const text = el.textContent || '';
                             return text.match(/[A-Z]{2,3}\d{3,4}/) || text.match(/[A-Z]{3}\d{3}/) || text.match(/GVS\d+/);
                         });
 
-                        if (visibleVehicles.length === 0) {
-                            return { ready: false, reason: 'No vehicle plates found', vehicleElements: vehicleElements.length };
+                        if (visiblePlates.length > 0) {
+                            return { 
+                                ready: true, 
+                                vehicleCount: visiblePlates.length,
+                                reason: 'Placas visibles detectadas - verificación rápida',
+                                quickCheck: true
+                            };
                         }
 
-                        // 4. Verificación adicional: que el virtual scroll haya terminado de renderizar
-                        const contentWrapper = document.querySelector('.cdk-virtual-scroll-content-wrapper');
-                        if (contentWrapper) {
-                            const transform = getComputedStyle(contentWrapper).transform;
-                            // Si está en transición, esperar
-                            if (transform && transform.includes('matrix')) {
-                                // Verificar estabilidad comparando en diferentes momentos
-                                if (window.lastTransform && window.lastTransform === transform) {
-                                    delete window.lastTransform;
-                                } else {
-                                    window.lastTransform = transform;
-                                    return { ready: false, reason: 'Virtual scroll still positioning' };
-                                }
-                            }
+                        // 2. Solo si no hay placas visibles, verificar el contenedor
+                        const scrollContainer = document.querySelector(
+                            '[id*=""cdk_scroll_location_vehicles_list""], cdk-virtual-scroll-viewport, .cdk-virtual-scroll-viewport'
+                        );
+                        
+                        if (!scrollContainer || scrollContainer.offsetHeight === 0) {
+                            return { ready: false, reason: 'Contenedor no encontrado o no visible' };
                         }
 
-                        return { 
-                            ready: true, 
-                            vehicleCount: visibleVehicles.length,
-                            reason: 'Virtual scroll ready with vehicles loaded'
-                        };
+                        // 3. Verificación mínima de estabilidad solo si no pasó verificación rápida
+                        const loadingIndicators = document.querySelectorAll(
+                            '.main-loading, .app-loading, .vehicle-list-loading'
+                        );
+                        const criticalLoading = Array.from(loadingIndicators).some(el => 
+                            el.offsetHeight > 0 && el.offsetWidth > 0
+                        );
+                        
+                        if (criticalLoading) {
+                            return { ready: false, reason: 'Indicadores de carga críticos activos' };
+                        }
+
+                        return { ready: false, reason: 'Sin placas visibles aún' };
                         
                     } catch (error) {
-                        return { ready: false, reason: 'JavaScript error: ' + error.message };
+                        return { ready: false, reason: 'Error JavaScript: ' + error.message };
                     }
                 ");
 
-                        if (scrollStatus != null)
+                        if (quickCheck != null)
                         {
-                            var status = scrollStatus as Dictionary<string, object>;
+                            var status = quickCheck as Dictionary<string, object>;
                             if (status != null && status.ContainsKey("ready"))
                             {
                                 var isReady = Convert.ToBoolean(status["ready"]);
                                 var reason = status.ContainsKey("reason") ? status["reason"].ToString() : "Unknown";
+                                var isQuickCheck = status.ContainsKey("quickCheck") && Convert.ToBoolean(status["quickCheck"]);
 
                                 if (isReady)
                                 {
                                     var vehicleCount = status.ContainsKey("vehicleCount") ? status["vehicleCount"].ToString() : "unknown";
-                                    _logger.Info($"Virtual scroll listo con {vehicleCount} vehículos detectados", true);
-                                    return true;
+
+                                    if (isQuickCheck)
+                                    {
+                                        _logger.Info($"✅ Virtual scroll listo RÁPIDAMENTE con {vehicleCount} vehículos detectados", true);
+                                        return true;
+                                    }
+                                    else
+                                    {
+                                        // Marcar que pasó verificación rápida para siguiente iteración
+                                        quickCheckPassed = true;
+                                        _logger.Info($"Virtual scroll listo con {vehicleCount} vehículos detectados", true);
+                                        return true;
+                                    }
                                 }
                                 else
                                 {
@@ -2165,7 +2035,8 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                         _logger.Debug($"Error verificando virtual scroll: {ex.Message}");
                     }
 
-                    await Task.Delay(200); // Verificar cada 200ms para ser más responsivo
+                    // Intervalo de verificación más frecuente para respuesta más rápida
+                    await Task.Delay(quickCheckPassed ? 50 : 150);
                 }
 
                 _logger.Warning("Timeout esperando que el virtual scroll esté listo", true);
@@ -2173,7 +2044,7 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             }
             catch (Exception ex)
             {
-                _logger.Error("Error en WaitForVehicleVirtualScrollReady", ex);
+                _logger.Error("Error en WaitForVehicleVirtualScrollReady optimizado", ex);
                 return false;
             }
         }
@@ -2663,6 +2534,88 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
             {
                 _logger.Debug($"Error en FindVehiclePlateSpan: {ex.Message}");
                 return null;
+            }
+        }
+
+        private async Task<bool> IsSpecificPlateReady(string patent, int timeoutSeconds = 5)
+        {
+            try
+            {
+                _logger.Debug($"Verificación rápida si placa {patent} está lista...");
+
+                var deadline = DateTime.Now.AddSeconds(timeoutSeconds);
+
+                while (DateTime.Now < deadline)
+                {
+                    try
+                    {
+                        var plateReady = ((IJavaScriptExecutor)_driver).ExecuteScript(@"
+                    try {
+                        const patent = arguments[0];
+                        
+                        // Buscar la placa específica por múltiples métodos
+                        const selectors = [
+                            `span.notranslate[textContent=""${patent}""]`,
+                            `[id*=""${patent}""]`,
+                            `*`
+                        ];
+                        
+                        for (const selector of selectors) {
+                            let elements;
+                            if (selector === '*') {
+                                // Búsqueda exhaustiva como último recurso
+                                elements = Array.from(document.querySelectorAll('*')).filter(el => 
+                                    el.textContent && el.textContent.trim() === patent
+                                );
+                            } else {
+                                elements = Array.from(document.querySelectorAll(selector));
+                            }
+                            
+                            for (const el of elements) {
+                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && 
+                                    (el.textContent && el.textContent.trim() === patent || 
+                                     el.id && el.id.includes(patent))) {
+                                    return { found: true, method: selector };
+                                }
+                            }
+                        }
+                        
+                        return { found: false, reason: 'Placa no encontrada' };
+                    } catch (error) {
+                        return { found: false, reason: 'Error: ' + error.message };
+                    }
+                ", patent);
+
+                        if (plateReady != null)
+                        {
+                            var result = plateReady as Dictionary<string, object>;
+                            if (result != null && result.ContainsKey("found"))
+                            {
+                                var found = Convert.ToBoolean(result["found"]);
+                                if (found)
+                                {
+                                    var method = result.ContainsKey("method") ? result["method"].ToString() : "unknown";
+                                    _logger.Info($"✅ Placa {patent} encontrada y lista (método: {method})", true);
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Debug($"Error verificando placa específica: {ex.Message}");
+                    }
+
+                    await Task.Delay(100); // Verificar cada 100ms
+                }
+
+                _logger.Debug($"Placa {patent} no encontrada en verificación rápida");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning($"Error en IsSpecificPlateReady: {ex.Message}");
+                return false;
             }
         }
 
