@@ -9,7 +9,7 @@ namespace VehicleTracking.Solution.Api.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [ServiceFilter(typeof(LogAttribute))]
-    [ServiceFilter(typeof(AutorizacionJwtAttribute))]
+    //[ServiceFilter(typeof(AutorizacionJwtAttribute))]
     [ServiceFilter(typeof(AccesoAttribute))]
     public class TrackingSatrackController : ControllerBase
     {

@@ -17,7 +17,7 @@ namespace VehicleTracking.Domain.Services.SatrackGps
 
         public TrackingService(
             IVehicleTrackingRepository repository,
-            ILocationScraperFactory scraperFactory,
+            ILocationScraperFactory scraperFactory, 
             ILogRepository log,
             IDbContextFactory<DBContext> contextFactory)
         {
@@ -134,6 +134,15 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                         if (locationData != null)
                         {
                             using var context = await _contextFactory.CreateDbContextAsync();
+                            
+                            // Crear objeto GeoPoint para la localización
+                            var geoPoint = new GeoPoint(
+                                Convert.ToDouble(locationData.Latitude),
+                                Convert.ToDouble(locationData.Longitude)
+                            );
+                            var locationPoint = geoPoint.ToPoint();
+                            
+                            // Crear tracking para VehicleInfoLocation
                             var tracking = new VehicleInfoLocation
                             {
                                 VehicleId = vehicle.Id,
@@ -152,24 +161,85 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                                 DetentionTime = locationData.DetentionTime,
                                 DistanceTraveled = locationData.DistanceTraveled,
                                 Temperature = locationData.Temperature,
-                                Location = new GeoPoint(
-                                    Convert.ToDouble(locationData.Latitude),
-                                    Convert.ToDouble(locationData.Longitude)
-                                ).ToPoint(),
+                                Location = locationPoint,
                                 Angle = (short?)locationData.Angle
                             };
-
-                            await context.VehicleInfoLocations.AddAsync(tracking);
-                            await context.SaveChangesAsync();
-
-                            result.Success = true;
-                            result.Message = "Ubicación registrada exitosamente";
-                            result.Status = "Procesado";
-                            result.Latitude = locationData.Latitude;
-                            result.Longitude = locationData.Longitude;
-
-                            _log.Info(idUsuario, ip, "TrackVehicles",
-                                $"Vehículo {vehicle.Patent} procesado exitosamente");
+                            
+                            // Crear registro para Position
+                            var position = new Position
+                            {
+                                VehicleId = vehicle.Id,
+                                GpsDate = locationData.Timestamp,
+                                ArriveDate = DateTime.Now,  // La hora actual en Colombia
+                                Course = locationData.Angle != 0 ? (int)locationData.Angle : 0,
+                                Speed = locationData.Speed != 0 ? (int)locationData.Speed : 0,
+                                Event = locationData.Reason ?? string.Empty,
+                                Description = locationData.Georeference ?? string.Empty,
+                                Location = locationPoint
+                            };
+                            
+                            try
+                            {
+                                // Buscar el registro más reciente para este vehículo en VehicleInfoLocation
+                                var existingTracking = await context.VehicleInfoLocations
+                                    .Where(v => v.VehicleId == vehicle.Id)
+                                    .OrderByDescending(v => v.Timestamp)
+                                    .FirstOrDefaultAsync();
+                                    
+                                if (existingTracking != null)
+                                {
+                                    // Actualizar el registro existente (manteniendo el mismo Id)
+                                    tracking.Id = existingTracking.Id;
+                                    context.Entry(existingTracking).CurrentValues.SetValues(tracking);
+                                    
+                                    _log.Info(idUsuario, ip, "TrackVehicles",
+                                        $"Actualizado registro existente en VehicleInfoLocation para vehículo {vehicle.Patent}, ID: {existingTracking.Id}");
+                                }
+                                else
+                                {
+                                    // Insertar nuevo registro
+                                    await context.VehicleInfoLocations.AddAsync(tracking);
+                                    
+                                    _log.Info(idUsuario, ip, "TrackVehicles",
+                                        $"Creado nuevo registro en VehicleInfoLocation para vehículo {vehicle.Patent}");
+                                }
+                                
+                                // Verificar si ya existe registro en Position
+                                var existingPosition = await context.Set<Position>().FindAsync(vehicle.Id);
+                                if (existingPosition != null)
+                                {
+                                    // Actualizar registro existente
+                                    context.Entry(existingPosition).CurrentValues.SetValues(position);
+                                }
+                                else
+                                {
+                                    // Agregar nuevo registro
+                                    await context.Set<Position>().AddAsync(position);
+                                }
+                                
+                                await context.SaveChangesAsync();
+                                
+                                // Registrar en log
+                                _log.Info(idUsuario, ip, "TrackVehicles",
+                                    $"Vehículo {vehicle.Patent} procesado exitosamente: " +
+                                    $"VehicleInfoLocation ID: {tracking.VehicleId}, " +
+                                    $"Position ID: {position.VehicleId}");
+                                
+                                result.Success = true;
+                                result.Message = "Ubicación registrada exitosamente";
+                                result.Status = "Procesado";
+                                result.Latitude = locationData.Latitude;
+                                result.Longitude = locationData.Longitude;
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.Error(idUsuario, ip, "TrackVehicles",
+                                    $"Error al guardar posiciones para vehículo {vehicle.Patent}: {ex.Message}");
+                                
+                                result.Success = false;
+                                result.Message = "Error al guardar en base de datos";
+                                result.Status = "Error de persistencia";
+                            }
                         }
                         else
                         {
@@ -256,6 +326,15 @@ namespace VehicleTracking.Domain.Services.SatrackGps
         private async Task SaveVehicleTracking(Vehicle vehicle, LocationDataInfo locationData)
         {
             using var context = await _contextFactory.CreateDbContextAsync();
+            
+            // Crear objeto GeoPoint para la localización geográfica
+            var geoPoint = new GeoPoint(
+                Convert.ToDouble(locationData.Latitude),
+                Convert.ToDouble(locationData.Longitude)
+            );
+            var locationPoint = geoPoint.ToPoint();
+            
+            // Crear registro para la tabla VehicleInfoLocation
             var tracking = new VehicleInfoLocation
             {
                 VehicleId = vehicle.Id,
@@ -274,14 +353,76 @@ namespace VehicleTracking.Domain.Services.SatrackGps
                 DetentionTime = locationData.DetentionTime,
                 DistanceTraveled = locationData.DistanceTraveled,
                 Temperature = locationData.Temperature,
-                Location = new GeoPoint(
-                    Convert.ToDouble(locationData.Latitude),
-                    Convert.ToDouble(locationData.Longitude)
-                ).ToPoint(),
+                Location = locationPoint,
                 Angle = (short?)locationData.Angle
             };
-
-            await _repository.AddVehicleTrackingAsync(tracking);
+            
+            // Crear registro para la tabla Position
+            var position = new Position
+            {
+                VehicleId = vehicle.Id,
+                GpsDate = locationData.Timestamp,
+                ArriveDate = DateTime.Now,  // La fecha actual en Colombia (no se aplica UTC)
+                Course = locationData.Angle != 0 ? (int)locationData.Angle : 0,
+                Speed = locationData.Speed != 0 ? (int)locationData.Speed : 0,
+                Event = locationData.Reason ?? string.Empty,
+                Description = locationData.Georeference ?? string.Empty,
+                Location = locationPoint
+            };
+            
+            try
+            {
+                // Buscar el registro más reciente para este vehículo en VehicleInfoLocation
+                var existingTracking = await context.VehicleInfoLocations
+                    .Where(v => v.VehicleId == vehicle.Id)
+                    .OrderByDescending(v => v.Timestamp)
+                    .FirstOrDefaultAsync();
+                    
+                if (existingTracking != null)
+                {
+                    // Actualizar el registro existente (manteniendo el mismo Id)
+                    tracking.Id = existingTracking.Id;
+                    context.Entry(existingTracking).CurrentValues.SetValues(tracking);
+                    
+                    _log.Info("Sistema", "127.0.0.1", "ActualizaciónRegistro",
+                        $"Actualizado registro existente en VehicleInfoLocation para vehículo {vehicle.Patent}, ID: {existingTracking.Id}");
+                }
+                else
+                {
+                    // Insertar nuevo registro
+                    await context.VehicleInfoLocations.AddAsync(tracking);
+                    
+                    _log.Info("Sistema", "127.0.0.1", "NuevoRegistro",
+                        $"Creado nuevo registro en VehicleInfoLocation para vehículo {vehicle.Patent}");
+                }
+                
+                // Verificar si ya existe un registro para este vehículo en Position
+                var existingPosition = await context.Set<Position>().FindAsync(vehicle.Id);
+                if (existingPosition != null)
+                {
+                    // Actualizar registro existente
+                    context.Entry(existingPosition).CurrentValues.SetValues(position);
+                    
+                    _log.Info("Sistema", "127.0.0.1", "ActualizaciónRegistro",
+                        $"Actualizado registro existente en Position para vehículo {vehicle.Patent}, ID: {vehicle.Id}");
+                }
+                else
+                {
+                    // Agregar nuevo registro
+                    await context.Set<Position>().AddAsync(position);
+                    
+                    _log.Info("Sistema", "127.0.0.1", "NuevoRegistro",
+                        $"Creado nuevo registro en Position para vehículo {vehicle.Patent}");
+                }
+                
+                await context.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Sistema", "127.0.0.1", "GuardarPosición",
+                    $"Error al guardar posición para vehículo {vehicle.Patent}: {ex.Message}");
+                throw;
+            }
         }
     }
 }
