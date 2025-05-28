@@ -51,10 +51,10 @@ namespace VehicleTracking.Domain.Scraping.SatrackGps
                 options.AddUserProfilePreference("profile.password_manager_enabled", false);
 
                 // COMENTAR O ELIMINAR ESTA CONDICIÓN PARA FORZAR MODO VISIBLE
-                //if (_seleniumConfig.Headless)
-                //{
-                //    options.AddArgument("--headless");
-                //}
+                if (_seleniumConfig.Headless)
+                {
+                    options.AddArgument("--headless");
+                }
 
                 var chromeDriverService = string.IsNullOrEmpty(_seleniumConfig.ChromeDriverPath)
                     ? ChromeDriverService.CreateDefaultService()

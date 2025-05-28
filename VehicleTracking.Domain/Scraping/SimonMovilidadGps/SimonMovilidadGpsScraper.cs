@@ -41,12 +41,17 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                 options.AddArgument($"--window-size={_seleniumConfig.WindowSize}");
                 options.AddArgument("--disable-notifications");
                 options.AddArgument("--disable-popup-blocking");
+                options.AddArgument("--disable-features=PasswordManagerLeakDetection,PasswordElement,PasswordProtectionWarning,AutofillServerCommunication");
+                options.AddArgument("--disable-blink-features=CredentialManagerAPI"); // evita autocompletado interno
+                options.AddUserProfilePreference("safebrowsing.enabled", false);      // desactiva Password Leak Detection
+                options.AddArgument("--guest");
                 options.AddUserProfilePreference("credentials_enable_service", false);
                 options.AddUserProfilePreference("profile.password_manager_enabled", false);
                 options.AddArgument("--disable-session-crashed-bubble");
                 options.AddArgument("--disable-infobars");
                 options.AddUserProfilePreference("profile.default_content_setting_values.notifications", 2);
 
+                // COMENTAR O ELIMINAR ESTA CONDICIÓN PARA FORZAR MODO VISIBLE
                 if (_seleniumConfig.Headless)
                 {
                     options.AddArgument("--headless");
@@ -59,18 +64,13 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                 chromeDriverService.HideCommandPromptWindow = true;
 
                 _driver = new ChromeDriver(chromeDriverService, options);
+
+                // AÑADIR ESTAS LÍNEAS PARA MAXIMIZAR LA VENTANA Y CONFIGURAR TIMEOUTS
+                _driver.Manage().Window.Maximize();
+                _driver.Manage().Timeouts().ImplicitWait = TimeSpan.Zero;
+
                 _wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_config.TimeoutSeconds));
-                _isLoggedIn = false;
-
-                //var chromeDriverService = ChromeDriverService.CreateDefaultService();
-                //chromeDriverService.HideCommandPromptWindow = true;
-
-                //_driver = new ChromeDriver(chromeDriverService, options);
-                //_wait = new WebDriverWait(_driver, TimeSpan.FromSeconds(_config.TimeoutSeconds));
-                //_isLoggedIn = false;
-
-                //_driver.Manage().Window.Maximize();
-                //_driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromSeconds(10);
+                _isLoggedIn = false;           
 
                 _logger.Info("Inicialización del ChromeDriver completada exitosamente", true);
             }
