@@ -52,10 +52,10 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                 options.AddUserProfilePreference("profile.default_content_setting_values.notifications", 2);
 
                 // COMENTAR O ELIMINAR ESTA CONDICIÓN PARA FORZAR MODO VISIBLE
-                if (_seleniumConfig.Headless)
-                {
-                    options.AddArgument("--headless");
-                }
+                //if (_seleniumConfig.Headless)
+                //{
+                //    options.AddArgument("--headless");
+                //}
 
                 var chromeDriverService = string.IsNullOrEmpty(_seleniumConfig.ChromeDriverPath)
                     ? ChromeDriverService.CreateDefaultService()
@@ -81,10 +81,13 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
             }
         }
 
-        public async Task<bool> LoginAsync(string username, string password)
+        public async Task<bool> LoginAsync(string username, string password, string patent)
         {
             try
             {
+                // Asignar la patente directamente aquí
+                _currentPatent = patent;
+                
                 // Limpiar espacios en blanco de las credenciales
                 username = username?.Trim() ?? string.Empty;
                 password = password?.Trim() ?? string.Empty;

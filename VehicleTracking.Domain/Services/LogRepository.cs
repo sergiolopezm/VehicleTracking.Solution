@@ -1,16 +1,17 @@
-﻿using VehicleTracking.Domain.Contracts;
+﻿using Microsoft.EntityFrameworkCore;
+using VehicleTracking.Domain.Contracts;
 using VehicleTracking.Infrastructure;
 
 namespace VehicleTracking.Domain.Services
 {
     public class LogRepository : ILogRepository
     {
-        private readonly DBContext _context;
+        private readonly IDbContextFactory<DBContext> _contextFactory;
         private readonly FileLoggerService _fileLogger;
 
-        public LogRepository(DBContext context, FileLoggerService fileLogger)
+        public LogRepository(IDbContextFactory<DBContext> contextFactory, FileLoggerService fileLogger)
         {
-            _context = context;
+            _contextFactory = contextFactory;
             _fileLogger = fileLogger;
         }
 
@@ -36,6 +37,20 @@ namespace VehicleTracking.Domain.Services
 
         private async Task GuardarLogAsync(string idUsuario, string ip, string accion, string detalle, string tipo)
         {
+            // Asegurar que el tipo no exceda los 3 caracteres
+            if (tipo != null && tipo.Length > 3)
+            {
+                // Mapear tipos comunes a sus equivalentes de 3 caracteres
+                tipo = tipo switch
+                {
+                    "INFO" => "400",
+                    "WARNING" => "WAR",
+                    "ERROR" => "500",
+                    "DEBUG" => "DBG",
+                    _ => tipo.Length > 3 ? tipo.Substring(0, 3) : tipo
+                };
+            }
+
             var log = new Log
             {
                 Fecha = DateTime.Now,
@@ -50,10 +65,9 @@ namespace VehicleTracking.Domain.Services
             _fileLogger.WriteLog(idUsuario, ip, accion, detalle, tipo);
 
             // Guardar en base de datos
-            _context.ChangeTracker.Clear();
-            await _context.Logs.AddAsync(log);
-            await _context.SaveChangesAsync();
-
+            await using var dbContext = await _contextFactory.CreateDbContextAsync();
+            await dbContext.Logs.AddAsync(log);
+            await dbContext.SaveChangesAsync();
         }
     }
 }
