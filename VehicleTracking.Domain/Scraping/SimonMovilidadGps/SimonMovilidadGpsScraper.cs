@@ -87,7 +87,7 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
             {
                 // Asignar la patente directamente aquí
                 _currentPatent = patent;
-                
+
                 // Limpiar espacios en blanco de las credenciales
                 username = username?.Trim() ?? string.Empty;
                 password = password?.Trim() ?? string.Empty;
@@ -163,37 +163,85 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                     js.ExecuteScript("arguments[0].click();", loginButton);
                 }
 
-                // Esperar a que aparezca el botón de Rastrear o algún elemento que confirme el login exitoso
+                // ACTUALIZADO: Esperar elementos de la nueva interfaz post-login
                 var loginSuccess = await dynamicWait.WaitForConditionAsync(d =>
                 {
                     try
                     {
-                        // Verificar si existe el botón de Rastrear
-                        var trackButton = d.FindElement(By.XPath("//button[.//span[text()='Rastrear']]"));
-                        return trackButton != null && trackButton.Displayed;
+                        // Opción 1: Verificar si existe información del vehículo (panel de guantera)
+                        var vehicleInfo = d.FindElements(By.XPath("//h1[contains(text(), 'Guantera')] | //h2[contains(text(), 'Información')] | //div[contains(@class, 'vehicle-info')]"));
+                        if (vehicleInfo.Any(e => e.Displayed))
+                        {
+                            _logger.Debug("Login exitoso - Panel de información del vehículo detectado");
+                            return true;
+                        }
+
+                        // Opción 2: Verificar si existe el botón de Mapa en el panel lateral
+                        var mapButton = d.FindElements(By.XPath("//button[contains(text(), 'Mapa')] | //a[contains(text(), 'Mapa')] | //span[contains(text(), 'Mapa')]"));
+                        if (mapButton.Any(e => e.Displayed))
+                        {
+                            _logger.Debug("Login exitoso - Botón Mapa detectado en panel lateral");
+                            return true;
+                        }
+
+                        // Opción 3: Verificar si existe el botón de Rastrear (flujo original)
+                        var trackButton = d.FindElements(By.XPath("//button[.//span[text()='Rastrear']] | //button[contains(text(), 'Rastrear')]"));
+                        if (trackButton.Any(e => e.Displayed))
+                        {
+                            _logger.Debug("Login exitoso - Botón Rastrear detectado (flujo original)");
+                            return true;
+                        }
+
+                        // Opción 4: Verificar si existe el título "Vehículos activos"
+                        var title = d.FindElements(By.XPath("//h1[contains(text(), 'Vehículos activos')] | //h2[contains(text(), 'Vehículos activos')]"));
+                        if (title.Any(e => e.Displayed))
+                        {
+                            _logger.Debug("Login exitoso - Título 'Vehículos activos' detectado");
+                            return true;
+                        }
+
+                        // Opción 5: Verificar elementos específicos de la nueva interfaz
+                        var dashboardElements = d.FindElements(By.CssSelector(
+                            "[class*='dashboard'], [class*='main-content'], [class*='vehicle-panel'], " +
+                            "[class*='sidebar'], .flex.flex-1.flex-col, .bg-secondary"
+                        ));
+                        if (dashboardElements.Any(e => e.Displayed))
+                        {
+                            _logger.Debug("Login exitoso - Elementos del dashboard detectados");
+                            return true;
+                        }
+
+                        return false;
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        try
-                        {
-                            // Verificar si existe el título "Vehículos activos"
-                            var title = d.FindElement(By.XPath("//h1[contains(text(), 'Vehículos activos')]"));
-                            return title != null && title.Displayed;
-                        }
-                        catch
-                        {
-                            return false;
-                        }
+                        _logger.Debug($"Error verificando login: {ex.Message}");
+                        return false;
                     }
-                }, "login_verification", TimeSpan.FromSeconds(10));
+                }, "login_verification", TimeSpan.FromSeconds(15));
 
                 if (!loginSuccess)
                 {
-                    _logger.Error("No se pudo verificar el login exitoso");
+                    // Verificar si hubo error de credenciales
+                    try
+                    {
+                        var errorElements = _driver.FindElements(By.CssSelector(
+                            ".error, .alert, .warning, [class*='error'], [class*='alert'], [class*='warning']"
+                        ));
+
+                        if (errorElements.Any(e => e.Displayed && !string.IsNullOrEmpty(e.Text)))
+                        {
+                            var errorMessage = errorElements.First(e => e.Displayed).Text;
+                            _logger.Error($"Error de login detectado: {errorMessage}");
+                        }
+                    }
+                    catch { }
+
+                    _logger.Error("No se pudo verificar el login exitoso después de 15 segundos");
                     return false;
                 }
 
-                _logger.Info("Login exitoso verificado");
+                _logger.Info("Login exitoso verificado", true);
                 _isLoggedIn = true;
                 return true;
             }
@@ -459,21 +507,108 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                 _logger.Debug("Iniciando navegación a sección de vehículos");
                 var dynamicWait = new DynamicWaitHelper(_driver);
 
-                // Esperar y hacer clic en el botón de rastreo
+                // NUEVO: Primero buscar el botón "Mapa" en el panel lateral
+                var (mapButton, mapButtonError) = await dynamicWait.WaitForElementAsync(
+                    By.XPath("//button[contains(text(), 'Mapa')] | //a[contains(text(), 'Mapa')] | //span[contains(text(), 'Mapa')]/parent::button | //span[contains(text(), 'Mapa')]/parent::a"),
+                    "map_button",
+                    ensureClickable: true
+                );
+
+                if (mapButton != null)
+                {
+                    _logger.Debug("Botón 'Mapa' encontrado en panel lateral, haciendo clic");
+
+                    try
+                    {
+                        mapButton.Click();
+                    }
+                    catch
+                    {
+                        // Intentar con JavaScript si el clic normal falla
+                        ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", mapButton);
+                    }
+
+                    // Esperar dinámicamente a que el mapa se cargue
+                    var mapLoaded = await dynamicWait.WaitForConditionAsync(d =>
+                    {
+                        try
+                        {
+                            // Verificar que el contenedor del mapa está presente y visible
+                            var mapContainer = d.FindElement(By.CssSelector(".leaflet-container, .map-container, [class*='map']"));
+                            if (mapContainer == null || !mapContainer.Displayed) return false;
+
+                            // Verificar que el mapa no está en estado de carga
+                            var loadingElements = d.FindElements(By.CssSelector(".loading, .spinner, [class*='loading'], [class*='spinner']"));
+                            if (loadingElements.Any(e => e.Displayed)) return false;
+
+                            // Verificar que la URL cambió o que elementos específicos del mapa están presentes
+                            var mapReady = d.Url.Contains("map") || d.Url.Contains("tracking") ||
+                                          d.FindElements(By.CssSelector(".leaflet-map-pane, .leaflet-control")).Any(e => e.Displayed);
+
+                            return mapReady;
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    }, "map_load_after_click", TimeSpan.FromSeconds(10));
+
+                    if (!mapLoaded)
+                    {
+                        _logger.Warning("El mapa no se cargó después de hacer clic en el botón Mapa");
+                    }
+
+                    // Verificar el estado de la página después de hacer clic en Mapa
+                    await CheckPageStatus("navegación a mapa desde panel lateral");
+                }
+                else
+                {
+                    _logger.Debug("No se encontró botón 'Mapa', intentando flujo original con botón 'Rastrear'");
+                }
+
+                // Buscar el botón de rastreo (puede estar ahora disponible después de hacer clic en Mapa)
                 var (trackButton, trackButtonError) = await dynamicWait.WaitForElementAsync(
-                    By.XPath("//button[.//span[text()='Rastrear']]"),
+                    By.XPath("//button[.//span[text()='Rastrear']] | //button[contains(text(), 'Rastrear')] | //a[contains(text(), 'Rastrear')]"),
                     "track_button",
                     ensureClickable: true
                 );
 
                 if (trackButton == null)
                 {
-                    _logger.Warning($"No se pudo encontrar el botón de rastreo. Detalles del error: {trackButtonError}", true);
-                    throw new InvalidOperationException("No se pudo encontrar el botón de rastreo");
+                    // Si no encontramos el botón de rastrear, intentar buscar alternativas
+                    _logger.Debug("Botón 'Rastrear' no encontrado, buscando alternativas");
+
+                    // Intentar buscar directamente el icono del vehículo en el mapa
+                    var (vehicleIcon, vehicleIconError) = await dynamicWait.WaitForElementAsync(
+                        By.CssSelector("div.leaflet-marker-icon.leaflet-zoom-animated.leaflet-interactive[tabindex='0']"),
+                        "vehicle_icon_direct",
+                        ensureClickable: false
+                    );
+
+                    if (vehicleIcon != null)
+                    {
+                        _logger.Info("Vehículo encontrado directamente en el mapa, omitiendo botón de rastrear");
+                        return; // El mapa ya está cargado con los vehículos
+                    }
+
+                    // Si tampoco encontramos vehículos, lanzar error
+                    var errorMsg = $"No se pudo encontrar el botón de rastreo ni vehículos en el mapa. " +
+                                  $"Error botón rastrear: {trackButtonError}. " +
+                                  $"Error botón mapa: {mapButtonError}";
+                    _logger.Warning(errorMsg, true);
+                    throw new InvalidOperationException(errorMsg);
                 }
 
-                // Hacer clic en el botón
-                trackButton.Click();
+                // Hacer clic en el botón de rastrear
+                _logger.Debug("Botón 'Rastrear' encontrado, haciendo clic");
+                try
+                {
+                    trackButton.Click();
+                }
+                catch
+                {
+                    ((IJavaScriptExecutor)_driver).ExecuteScript("arguments[0].click();", trackButton);
+                }
 
                 // Verificar el estado de la página después de la navegación
                 await CheckPageStatus("navegación a sección de vehículos");
@@ -484,7 +619,8 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                     try
                     {
                         var currentUrl = d.Url;
-                        return currentUrl.Contains("startPosition") || currentUrl.Contains("zoom=");
+                        return currentUrl.Contains("startPosition") || currentUrl.Contains("zoom=") ||
+                               currentUrl.Contains("map") || currentUrl.Contains("tracking");
                     }
                     catch
                     {
@@ -494,7 +630,26 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
 
                 if (!urlChanged)
                 {
-                    throw new InvalidOperationException("La URL no cambió después de hacer clic en Rastrear");
+                    _logger.Debug("La URL no cambió, verificando si el mapa está visible");
+
+                    // Verificar si el mapa está presente aunque la URL no haya cambiado
+                    var mapPresent = await dynamicWait.WaitForConditionAsync(d =>
+                    {
+                        try
+                        {
+                            var mapContainer = d.FindElement(By.CssSelector(".leaflet-container, .map-container, [class*='map']"));
+                            return mapContainer != null && mapContainer.Displayed;
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    }, "map_container_visible");
+
+                    if (!mapPresent)
+                    {
+                        throw new InvalidOperationException("El mapa no se cargó después de hacer clic en Rastrear");
+                    }
                 }
 
                 // Esperar a que el marcador del vehículo esté presente
@@ -503,18 +658,22 @@ namespace VehicleTracking.Domain.Scraping.SimonMovilidadGps
                     try
                     {
                         return d.FindElements(By.CssSelector(
-                            "div.leaflet-marker-icon.leaflet-zoom-animated.leaflet-interactive[tabindex='0']"
+                            "div.leaflet-marker-icon.leaflet-zoom-animated.leaflet-interactive[tabindex='0'], " +
+                            ".leaflet-marker-icon, " +
+                            "[class*='marker'], " +
+                            "[class*='vehicle-icon']"
                         )).Any(m => m.Displayed);
                     }
                     catch
                     {
                         return false;
                     }
-                }, "marker_visible");
+                }, "marker_visible", TimeSpan.FromSeconds(15));
 
                 if (!markerPresent)
                 {
-                    throw new InvalidOperationException("No se pudo encontrar el marcador del vehículo");
+                    _logger.Warning("No se pudo encontrar el marcador del vehículo después de 15 segundos");
+                    // No lanzar excepción aquí, continuar con el proceso
                 }
 
                 _logger.Info("Navegación a sección de vehículos completada exitosamente", true);

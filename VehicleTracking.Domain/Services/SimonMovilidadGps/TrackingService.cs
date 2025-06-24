@@ -172,8 +172,10 @@ namespace VehicleTracking.Domain.Services.SimonMovilidadGps
                                 ArriveDate = DateTime.Now,  // La hora actual en Colombia
                                 Course = locationData.Angle != 0 ? (int)locationData.Angle : 0,
                                 Speed = locationData.Speed != 0 ? (int)locationData.Speed : 0,
-                                Event = locationData.Reason ?? string.Empty,
-                                Description = locationData.Georeference ?? string.Empty,
+                                // Limitar la longitud del campo Event a 260 caracteres para estar dentro del límite
+                                Event = (locationData.Reason?.Length > 260) ? locationData.Reason.Substring(0, 260) : locationData.Reason ?? string.Empty,
+                                // Limitar también la longitud del campo Description por precaución
+                                Description = (locationData.Georeference?.Length > 1000) ? locationData.Georeference.Substring(0, 1000) : locationData.Georeference ?? string.Empty,
                                 Location = locationPoint
                             };
 
@@ -357,8 +359,10 @@ namespace VehicleTracking.Domain.Services.SimonMovilidadGps
                 ArriveDate = DateTime.Now,  // La fecha actual en Colombia
                 Course = locationData.Angle != 0 ? (int)locationData.Angle : 0,
                 Speed = locationData.Speed != 0 ? (int)locationData.Speed : 0,
-                Event = locationData.Reason ?? string.Empty,
-                Description = locationData.Georeference ?? string.Empty,
+                // Limitar la longitud del campo Event a 260 caracteres para estar dentro del límite
+                Event = (locationData.Reason?.Length > 260) ? locationData.Reason.Substring(0, 260) : locationData.Reason ?? string.Empty,
+                // Limitar también la longitud del campo Description por precaución
+                Description = (locationData.Georeference?.Length > 1000) ? locationData.Georeference.Substring(0, 1000) : locationData.Georeference ?? string.Empty,
                 Location = locationPoint
             };
 
